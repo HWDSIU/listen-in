@@ -76,19 +76,19 @@ def validate_duration(seconds: float, maximum: float = DEFAULT_MAX_DURATION_SECO
 
 
 def validate_output_dir(path: str | Path) -> Path:
-    """Normalise an output directory. Accepts local and Databricks paths (``/Volumes/...``)."""
+    """Normalise an output directory: a local path or a mounted storage path."""
     if isinstance(path, str):
         if not path.strip():
             raise InvalidInputError("output_dir must not be empty.")
         if "\x00" in path:
             raise InvalidInputError("output_dir contains a NUL byte.")
         if path.startswith("dbfs:/"):
-            # Spark-style URI -> FUSE path, which Python file APIs understand.
+            # Storage URI with a local FUSE mount: use the mount, which Python file APIs can open.
             path = "/dbfs/" + path[len("dbfs:/") :].lstrip("/")
         if "://" in path:
             raise InvalidInputError(
                 f"output_dir must be a filesystem path, not a URI: {path!r}. "
-                "On Databricks use a Unity Catalog Volume path such as /Volumes/<catalog>/<schema>/<volume>/..."
+                "For cloud storage, use the path where it is mounted on this machine."
             )
     p = Path(path).expanduser()
     if p.exists() and not p.is_dir():

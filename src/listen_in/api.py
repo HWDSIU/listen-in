@@ -3,7 +3,7 @@
 Individual steps can be called directly (``resolve_station``, ``capture_stream``,
 ``transcribe_audio``, ``translate_transcript``, ``analyse_transcript``) or chained
 with ``process_station``.
-No function here starts a scheduler, a Spark session or a background thread.
+No function here starts a scheduler, a background thread or a service.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from ._version import __version__
 from .analysis import analyse_transcript, coerce_llm_config, resolve_api_key
@@ -24,6 +24,8 @@ from .models import (
     CaptureOptions,
     LLMConfig,
     ProcessingResult,
+    RunContext,
+    RunStation,
     Station,
     Transcript,
     TranslatedSegment,
@@ -72,8 +74,13 @@ def process_station(
     initial_prompt: str | None = None,
     on_language_mismatch: LanguageMismatchPolicy = "use_detected",
     translate: bool = True,
+    station_overrides: dict[str, Any] | None = None,
 ) -> ProcessingResult:
     """Resolve -> record -> transcribe -> translate -> analyse -> persist, for one station.
+
+    ``station_overrides`` corrects or adds station metadata after resolution, e.g.
+    ``{"latitude": 48.85, "longitude": 2.27}`` for a station Radio Browser has no
+    coordinates for (``location_precision`` then becomes ``"station"`` unless given).
 
     With an ``llm`` configured, a non-English transcript is also translated into
     English segment by segment (``translate=False`` turns this off) and the analysis
@@ -114,7 +121,7 @@ def process_station(
         package_version=__version__,
         started_at=started_at,
         station_input=ref,
-        language=language or "auto",
+        language_hint=language,
         requested_duration_seconds=duration,
         output_dir=str(layout.root),
         llm=llm_cfg.model_dump(mode="json") if llm_cfg else None,
@@ -136,7 +143,7 @@ def process_station(
     # 1. resolve -------------------------------------------------------------
     sw = Stopwatch()
     try:
-        st = resolve_station(station)
+        st = apply_station_overrides(resolve_station(station), station_overrides)
         result.station = st
         result.run_id = build_run_id(slugify(st.name or "stream"), st.uuid or "url", started_at)
         stages["resolve"].status, stages["resolve"].seconds = "ok", sw.seconds
@@ -173,6 +180,7 @@ def process_station(
         write_json(tpath, transcript, overwrite=overwrite)
         write_text(tpath.with_suffix(".txt"), transcript.text + "\n", overwrite=overwrite)
         result.transcript, result.transcript_path = transcript, tpath
+        result.language = transcript.language
         stages["transcribe"].status, stages["transcribe"].seconds = "ok", sw.seconds
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         fail("transcribe", exc, sw)
@@ -211,9 +219,10 @@ def process_station(
         sw = Stopwatch()
         try:
             analysis = analyse_transcript(transcript, config=llm_cfg, station_name=st.name or None)
-            analysis = analysis.model_copy(
-                update={"transcript": bilingual_transcript(transcript, result.translation)}
-            )
+            analysis = analysis.model_copy(update={
+                "run": run_context(result),
+                "transcript": bilingual_transcript(transcript, result.translation),
+            })
             apath = layout.analysis / f"{result.run_id}.json"
             write_json(apath, analysis, overwrite=overwrite)
             result.analysis, result.analysis_path = analysis, apath
@@ -222,6 +231,65 @@ def process_station(
             fail("analyse", exc, sw)
 
     return _persist(result, layout, overwrite, secrets)
+
+
+def run_context(result: ProcessingResult) -> RunContext:
+    """Run, time and station context stored at the top of the analysis file."""
+    st = result.station
+    return RunContext(
+        run_id=result.run_id,
+        recorded_at=result.audio.started_at if result.audio else None,
+        duration_seconds=result.audio.duration_seconds if result.audio else None,
+        language=result.language,
+        station=RunStation(**st.model_dump(include=set(RunStation.model_fields))) if st else None,
+        package_version=result.package_version,
+    )
+
+
+#: Left out of the manifest because they repeat other fields: audio.station is the
+#: top-level station, and analysis.transcript is transcript + translation.
+MANIFEST_EXCLUDE: dict[str, Any] = {"audio": {"station"}, "analysis": {"transcript"}}
+_PATH_FIELDS = ("audio_path", "transcript_path", "translation_path", "analysis_path", "manifest_path")
+
+
+def manifest_dict(result: ProcessingResult, output_root: Path) -> dict[str, Any]:
+    """The manifest JSON: no repeated blocks, file paths relative to ``output_dir``."""
+    data = result.model_dump(mode="json", exclude=MANIFEST_EXCLUDE)
+
+    def rel(value: Any) -> Any:
+        if not value:
+            return value
+        path = Path(value)
+        try:
+            return path.resolve().relative_to(output_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            return value
+
+    for key in _PATH_FIELDS:
+        data[key] = rel(data.get(key))
+    if data.get("audio"):
+        data["audio"]["path"] = rel(data["audio"].get("path"))
+    if data.get("transcript"):
+        data["transcript"]["audio_path"] = rel(data["transcript"].get("audio_path"))
+    return data
+
+
+def apply_station_overrides(station: Station, overrides: dict[str, Any] | None) -> Station:
+    """Return ``station`` with ``overrides`` applied and validated.
+
+    Supplying both coordinates without a ``location_precision`` marks them as exact
+    (``"station"``).
+    """
+    if not overrides:
+        return station
+    data = {**station.model_dump(), **overrides}
+    if ("latitude" in overrides or "longitude" in overrides) and "location_precision" not in overrides:
+        has_both = data.get("latitude") is not None and data.get("longitude") is not None
+        data["location_precision"] = "station" if has_both else None
+    try:
+        return Station.model_validate(data)
+    except ValidationError as exc:
+        raise InvalidInputError(f"Invalid station_overrides: {exc.errors(include_input=False)}") from exc
 
 
 def bilingual_transcript(transcript: Transcript, translation: Translation | None) -> BilingualTranscript:
@@ -255,10 +323,10 @@ def _persist(result: ProcessingResult, layout: OutputLayout, overwrite: bool,
     result.manifest_path = mpath
     result.stages["persist"].status = "ok"
     try:
-        write_json(mpath, result, overwrite=overwrite)
+        write_json(mpath, manifest_dict(result, layout.root), overwrite=overwrite)
         # Record the measured write time, then refresh the (small) manifest with it.
         result.stages["persist"].seconds = sw.seconds
-        write_json(mpath, result, overwrite=True)
+        write_json(mpath, manifest_dict(result, layout.root), overwrite=True)
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         result.stages["persist"].status = "failed"
         result.stages["persist"].error = describe_error(exc, secrets)

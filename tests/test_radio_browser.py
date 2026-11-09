@@ -213,6 +213,42 @@ def test_captures_subdivision_geo_tags_and_language_codes():
     ],
 )
 def test_extra_metadata_is_optional_and_cleaned(overrides, expected):
-    rec = station_record(**overrides)
+    rec = station_record(countrycode="", **overrides)  # no country: isolates cleaning from the fallback
     st = resolve_station(FRENCH_UUID, client=make_client(lambda r: httpx.Response(200, json=[rec])), servers=["s1"])
     assert (st.subdivision, st.subdivision_code, st.latitude, st.longitude, st.tags, st.language_codes) == expected
+
+
+# ------------------------------------------------------------ location precision
+def _resolve(rec):
+    return resolve_station(FRENCH_UUID, client=make_client(lambda r: httpx.Response(200, json=[rec])), servers=["s1"])
+
+
+def test_station_coordinates_have_station_precision():
+    st = _resolve(station_record(geo_lat=48.85, geo_long=2.27))
+    assert (st.latitude, st.longitude, st.location_precision) == (48.85, 2.27, "station")
+
+
+def test_missing_coordinates_fall_back_to_country_reference_point():
+    st = _resolve(station_record(countrycode="FR"))
+    assert (st.latitude, st.longitude, st.location_precision) == (48.86, 2.35, "country")
+
+
+def test_half_coordinates_count_as_missing():
+    st = _resolve(station_record(countrycode="FR", geo_lat=48.85))
+    assert st.location_precision == "country" and st.latitude == 48.86
+
+
+def test_unknown_country_has_no_location():
+    st = _resolve(station_record(countrycode="ZZ"))
+    assert (st.latitude, st.longitude, st.location_precision) == (None, None, None)
+
+
+def test_country_reference_table_is_sane():
+    from listen_in.geo import COUNTRY_REFERENCE_POINTS, country_reference_point
+
+    assert len(COUNTRY_REFERENCE_POINTS) > 200
+    for code, (lat, lon) in COUNTRY_REFERENCE_POINTS.items():
+        assert len(code) == 2 and code.isupper()
+        assert -90 <= lat <= 90 and -180 <= lon <= 180, code
+    assert country_reference_point("gb") == (51.51, -0.13)
+    assert country_reference_point(None) is None

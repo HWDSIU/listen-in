@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .utils import DEFAULT_MAX_DURATION_SECONDS, utc_now
 
@@ -36,8 +37,14 @@ class Station(_Model):
     subdivision_code: str | None = Field(
         default=None, description="ISO 3166-2 subdivision code (Radio Browser 'iso_3166_2'), e.g. 'DE-BE'."
     )
-    latitude: float | None = Field(default=None, description="Station latitude (Radio Browser 'geo_lat').")
-    longitude: float | None = Field(default=None, description="Station longitude (Radio Browser 'geo_long').")
+    latitude: float | None = Field(default=None, description="Latitude; see location_precision.")
+    longitude: float | None = Field(default=None, description="Longitude; see location_precision.")
+    location_precision: Literal["station", "subdivision", "country"] | None = Field(
+        default=None,
+        description="How exact latitude/longitude are: 'station' (Radio Browser or your own "
+        "coordinates), 'subdivision' (supplied for a region) or 'country' (listen-in's "
+        "approximate reference point for the country, usually the capital). None = no location.",
+    )
     language: str | None = Field(default=None, description="Radio Browser language tag(s).")
     language_codes: list[str] = Field(
         default_factory=list, description="Language codes listed by Radio Browser ('languagecodes'), lower-case."
@@ -150,6 +157,38 @@ class Transcript(_Model):
 
 
 # ----------------------------------------------------------------------- analysis
+EntityType = Literal["person", "organisation", "location"]
+
+#: Fixed topic vocabulary, so stories can be filtered and compared across stations.
+Topic = Literal[
+    "politics", "elections", "economy", "business", "labour", "conflict", "security",
+    "crime_justice", "health", "environment", "science_technology", "education",
+    "society", "migration", "culture", "religion", "sport", "weather", "transport",
+    "disaster", "international", "other",
+]
+
+
+class Entity(BaseModel):
+    """A person, organisation or place named in a story, for linking across stories."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: EntityType
+    name: str = Field(description="The name as heard in the broadcast (transliterated to Latin script).")
+    canonical_name: str = Field(
+        description="The standard full form of the name, e.g. 'MEDEF' when 'MDF' was heard, or "
+        "'Antonio Guterres' for 'Antony Guterres'. Repeat name when unsure. Only standardise "
+        "spelling or expand acronyms; never substitute a different entity."
+    )
+    role: str = Field(
+        description="Role or title as stated in the broadcast, e.g. 'head of the CFDT union'. "
+        "Empty string if the broadcast does not say."
+    )
+    uncertain: bool = Field(
+        description="True if the name may be misheard or the canonical_name is a guess."
+    )
+
+
 class NewsStory(BaseModel):
     """One story in the broadcast. Field names match the published analysis schema."""
 
@@ -157,13 +196,24 @@ class NewsStory(BaseModel):
 
     headline: str = Field(description="Short English headline.")
     summary: str = Field(description="Factual English summary based only on the transcript.")
+    topics: list[Topic] = Field(description="One to three topics from the fixed list.")
     people: list[str] = Field(description="People named, spelt as heard.")
     organisations: list[str] = Field(description="Organisations named.")
     locations: list[str] = Field(description="Places named.")
+    entities: list[Entity] = Field(
+        description="Every person, organisation and place in people/organisations/locations, "
+        "with its type, standard name and stated role. Exclude the broadcasting station itself."
+    )
     key_claims: list[str] = Field(description="Specific factual claims made in the broadcast.")
     uncertainties: list[str] = Field(
         description="Doubtful names, figures or passages (e.g. likely transcription errors)."
     )
+    segment_ids: list[int] = Field(
+        description="Ids of the transcript segments ([n] markers) this story comes from."
+    )
+    # Filled in by listen-in from segment_ids (not requested from the model).
+    start: SkipJsonSchema[float | None] = Field(default=None, description="Story start, seconds into the recording.")
+    end: SkipJsonSchema[float | None] = Field(default=None, description="Story end, seconds into the recording.")
 
 
 class NewsAnalysis(BaseModel):
@@ -173,7 +223,11 @@ class NewsAnalysis(BaseModel):
 
     news_detected: bool = Field(description="True only if the transcript contains substantive news.")
     broadcast_language: str = Field(description="ISO 639-1 code of the broadcast language.")
-    translation_used: bool = Field(description="True if the output was translated into English.")
+    translation_used: bool = Field(
+        description="True if the model translated from the broadcast language to write this English "
+        "analysis. (Whether listen-in also produced a full English transcript is "
+        "transcript.translated.)"
+    )
     summary_en: str = Field(description="Concise English summary based only on the transcript.")
     stories: list[NewsStory] = Field(description="Empty when no substantive news is present.")
 
@@ -290,9 +344,38 @@ class BilingualTranscript(_Model):
     segments: list[TranslatedSegment] = Field(default_factory=list)
 
 
+class RunStation(_Model):
+    """The station fields needed to place and label a run (subset of :class:`Station`)."""
+
+    name: str
+    uuid: str | None = None
+    country: str | None = None
+    countrycode: str | None = None
+    subdivision: str | None = None
+    subdivision_code: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    location_precision: Literal["station", "subdivision", "country"] | None = None
+    homepage: str | None = None
+
+
+class RunContext(_Model):
+    """Where and when a run happened, so an analysis file stands on its own."""
+
+    run_id: str
+    recorded_at: datetime | None = Field(default=None, description="When recording started (UTC).")
+    duration_seconds: float | None = None
+    language: str | None = Field(default=None, description="Language the transcript is in.")
+    station: RunStation | None = None
+    package_version: str | None = None
+
+
 class AnalysisResult(_Model):
     """A validated :class:`NewsAnalysis` plus non-secret call metadata."""
 
+    run: RunContext | None = Field(
+        default=None, description="Run, station and time context; added by process_station."
+    )
     analysis: NewsAnalysis
     transcript: BilingualTranscript | None = Field(
         default=None,
@@ -324,7 +407,8 @@ class ProcessingResult(_Model):
     started_at: datetime
     finished_at: datetime | None = None
     station_input: str
-    language: str
+    language_hint: str | None = Field(default=None, description="Language requested (None = detect).")
+    language: str | None = Field(default=None, description="Language the transcript is in, once known.")
     requested_duration_seconds: int
     output_dir: str
     station: Station | None = None

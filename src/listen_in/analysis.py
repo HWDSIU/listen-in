@@ -51,7 +51,17 @@ record that in the story's uncertainties rather than silently correcting it.
 are not news. If there is no substantive news, set news_detected to false, return an \
 empty stories list, and use summary_en to describe briefly what the segment contained.
 - One story per distinct news item. summary_en gives a concise overview of the whole \
-segment."""
+segment.
+- topics: one to three topics per story from the allowed list.
+- entities: list every person, organisation and place from that story's people, \
+organisations and locations, once each. name is the spelling as heard. canonical_name \
+is the standard full form of the same entity (e.g. an acronym spelt out, a misheard \
+spelling corrected); repeat name when unsure, and set uncertain to true when the name \
+may be misheard or the canonical form is a guess. You may use general knowledge only to \
+standardise names, never to add facts. role is the role or title as stated in the \
+broadcast, or an empty string. Never list the broadcasting station itself or its \
+programmes as an entity.
+- segment_ids: the [n] markers of the transcript segments each story comes from."""
 
 
 def build_user_message(transcript: Transcript, station_name: str | None = None) -> str:
@@ -63,7 +73,23 @@ def build_user_message(transcript: Transcript, station_name: str | None = None) 
         meta.append(f"Station: {station_name}")
     if transcript.duration_seconds:
         meta.append(f"Recording length: {transcript.duration_seconds:.0f} seconds")
-    return "\n".join(meta) + f"\n\n<transcript>\n{transcript.text}\n</transcript>"
+    segments = [s for s in transcript.segments if s.text.strip()]
+    body = "\n".join(f"[{s.id}] {s.text.strip()}" for s in segments) if segments else transcript.text
+    return "\n".join(meta) + f"\n\n<transcript>\n{body}\n</transcript>"
+
+
+def add_story_times(analysis: NewsAnalysis, transcript: Transcript) -> NewsAnalysis:
+    """Keep only segment ids that exist and set each story's start/end from them."""
+    by_id = {s.id: s for s in transcript.segments}
+    stories = []
+    for story in analysis.stories:
+        ids = sorted({i for i in story.segment_ids if i in by_id})
+        stories.append(story.model_copy(update={
+            "segment_ids": ids,
+            "start": min(by_id[i].start for i in ids) if ids else None,
+            "end": max(by_id[i].end for i in ids) if ids else None,
+        }))
+    return analysis.model_copy(update={"stories": stories})
 
 
 # ----------------------------------------------------------------- provider API
@@ -508,7 +534,7 @@ def analyse_transcript(
         task="analyse this transcript",
     )
     return AnalysisResult(
-        analysis=call.parsed,
+        analysis=add_story_times(call.parsed, transcript),
         provider=cfg.provider,
         model=cfg.model or "",
         input_tokens=call.input_tokens,

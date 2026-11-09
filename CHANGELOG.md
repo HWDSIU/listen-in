@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-09
+
+### Added
+- Per-story `entities`: type, name as heard, `canonical_name` (standardised so
+  the same entity can be matched across stories, stations and languages),
+  `role` as stated, and an `uncertain` flag. The broadcasting station itself is
+  excluded. The plain `people` / `organisations` / `locations` lists are kept.
+- Per-story `topics` from a fixed list, and `segment_ids` with `start` / `end`
+  seconds (computed by listen-in from the transcript segments) to link a story
+  back to the audio. The analysis prompt now numbers transcript segments.
+- `run` block at the top of the analysis file (run id, recording time,
+  duration, language, station name, country, region and coordinates), so it
+  stands on its own.
+- `Station.location_precision` (`station`, `subdivision`, `country` or none),
+  a built-in country reference point used when Radio Browser has no
+  coordinates, and `process_station(station_overrides=...)` to supply or
+  correct station details.
+
+### Changed
+- Manifests no longer repeat `audio.station` or `analysis.transcript`, and
+  store file paths relative to `output_dir`.
+- `ProcessingResult.language` is now the transcript's language; the
+  requested language moved to `language_hint` (`None` when detecting).
+- README: platform-specific deployment and scheduling sections and the
+  notebook example removed; new sections on the analysis file, station
+  location and using the results (map and entity network examples).
+
 ## [0.3.1] - 2026-11-09
 
 ### Added
@@ -78,8 +105,8 @@ All notable changes to this project are documented here. The format follows
 - `analyse_transcript`: structured English news analysis via Anthropic Claude
   (default `claude-haiku-5-5`) with Pydantic validation and one repair retry.
 - `process_station`: end-to-end run with per-stage status/timings and JSON manifests,
-  local or Databricks Volume output.
-- Examples for a local two-station test (English + French) and a Databricks notebook task.
+  local or mounted-volume output.
+- Examples for a local two-station test (English + French) and a hosted-notebook task.
 - README guidance on choosing a Whisper model: `small` by default, `turbo` for less
   widely spoken languages such as Swahili.
 

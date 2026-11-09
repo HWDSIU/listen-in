@@ -1,12 +1,12 @@
-"""Output layout and safe writes for local paths and Databricks Volumes.
+"""Output layout and safe writes for local paths and mounted storage.
 
 Layout under ``output_dir``::
 
     audio/  transcripts/  analysis/  manifests/
 
-Work happens in a local staging directory (normally under the system temp dir, i.e.
-``/tmp`` on a Databricks driver); finished artefacts are then copied to the
-destination. Writes go to ``<name>.partial`` then ``os.replace``; if the destination
+Work happens in a local staging directory (normally under the system temp dir,
+e.g. ``/tmp``); finished artefacts are then copied to the destination, which may be
+a network or cloud-storage mount. Writes go to ``<name>.partial`` then ``os.replace``; if the destination
 filesystem refuses the rename (some FUSE mounts), we fall back to a direct copy.
 """
 

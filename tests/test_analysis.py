@@ -28,11 +28,18 @@ VALID = {
         {
             "headline": "Fuel prices rise",
             "summary": "The bulletin said pump prices rose.",
+            "topics": ["economy"],
             "people": [],
             "organisations": ["Ministry of Energy"],
             "locations": ["Paris"],
+            "entities": [
+                {"type": "organisation", "name": "Ministry of Energy", "canonical_name": "Ministry of Energy",
+                 "role": "", "uncertain": False},
+                {"type": "location", "name": "Paris", "canonical_name": "Paris", "role": "", "uncertain": False},
+            ],
             "key_claims": ["Prices rose by 5 cents"],
             "uncertainties": [],
+            "segment_ids": [1],
         }
     ],
 }
@@ -244,3 +251,48 @@ def test_anthropic_effort_omitted_unless_set():
     provider, httpx2 = _anthropic_with_mock(handler)
     analyse_transcript(transcript(), llm_provider=provider)
     assert "effort" not in seen["body"]["output_config"]
+
+
+# ------------------------------------------------- entities, topics, story times
+def segmented(lang: str = "fr") -> Transcript:
+    from listen_in.models import TranscriptSegment
+
+    texts = ["Il est treize heures.", "Le prix du carburant augmente.", "La météo maintenant."]
+    segs = [TranscriptSegment(id=i, start=i * 4.0, end=i * 4.0 + 3.5, text=t) for i, t in enumerate(texts)]
+    return Transcript(text=" ".join(texts), language=lang, segments=segs, model="small", device="cpu")
+
+
+def test_user_message_numbers_segments():
+    msg = build_user_message(segmented(), "France Info")
+    assert "[0] Il est treize heures.\n[1] Le prix du carburant augmente." in msg
+
+
+def test_prompt_covers_entities_topics_and_segments():
+    for phrase in ("canonical_name", "never to add facts", "broadcasting station itself", "segment_ids", "topics"):
+        assert phrase in SYSTEM_PROMPT
+
+
+def test_story_times_come_from_segment_ids_and_bad_ids_are_dropped():
+    story = {**VALID["stories"][0], "segment_ids": [2, 1, 99]}
+    r = analyse_transcript(segmented(), llm_provider=FakeProvider(ok({**VALID, "stories": [story]})))
+    s = r.analysis.stories[0]
+    assert s.segment_ids == [1, 2]
+    assert (s.start, s.end) == (4.0, 11.5)
+    assert s.entities[0].type == "organisation" and s.topics == ["economy"]
+
+
+def test_story_without_segments_has_no_times():
+    story = {**VALID["stories"][0], "segment_ids": []}
+    r = analyse_transcript(segmented(), llm_provider=FakeProvider(ok({**VALID, "stories": [story]})))
+    assert (r.analysis.stories[0].start, r.analysis.stories[0].end) == (None, None)
+
+
+def test_model_cannot_set_story_times_and_unknown_topics_are_rejected():
+    from listen_in.models import NewsAnalysis
+
+    story_schema = NewsAnalysis.model_json_schema()["$defs"]["NewsStory"]["properties"]
+    assert "start" not in story_schema and "end" not in story_schema
+    bad = {**VALID, "stories": [{**VALID["stories"][0], "topics": ["gossip"]}]}
+    p = FakeProvider(ok(bad), ok())
+    r = analyse_transcript(segmented(), llm_provider=p)
+    assert r.repaired is True and "topics" in p.calls[1]["messages"][-1]["content"]

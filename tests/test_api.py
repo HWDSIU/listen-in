@@ -266,3 +266,56 @@ def test_translation_failure_keeps_transcript_and_analysis(tmp_path, pipeline):
     assert r.transcript_path.exists()
     block = json.loads(r.analysis_path.read_text())["transcript"]
     assert block["text"] == "Il est treize heures." and block["text_en"] is None
+
+
+# ------------------------------------------------- manifest / analysis file shape
+def test_manifest_has_no_repeated_blocks_and_relative_paths(tmp_path, pipeline):
+    r = run(tmp_path, llm=LLM)
+    m = json.loads(r.manifest_path.read_text())
+    assert "station" not in m["audio"]           # same as top-level station
+    assert "transcript" not in m["analysis"]     # same as transcript + translation
+    assert m["translation"]["text_en"] and m["transcript"]["text"]
+    assert m["audio_path"] == f"audio/{RUN_ID}.wav"
+    assert m["transcript_path"] == f"transcripts/{RUN_ID}.json"
+    assert m["translation_path"] == f"transcripts/{RUN_ID}.en.txt"
+    assert m["analysis_path"] == f"analysis/{RUN_ID}.json"
+    assert m["manifest_path"] == f"manifests/{RUN_ID}.json"
+    assert m["audio"]["path"] == f"audio/{RUN_ID}.wav"
+    # The in-memory result keeps full objects and real paths.
+    assert r.audio.station is not None and r.analysis.transcript is not None
+    assert r.audio_path.exists()
+
+
+def test_language_hint_and_language_are_separate(tmp_path, pipeline):
+    r = run(tmp_path)
+    assert (r.language_hint, r.language) == ("fr", "fr")
+    m = json.loads(r.manifest_path.read_text())
+    assert (m["language_hint"], m["language"]) == ("fr", "fr")
+    r2 = api.process_station(FRENCH_HISTORY, None, 60, tmp_path / "out2", staging_dir=tmp_path / "s2")
+    assert r2.language_hint is None
+
+
+def test_analysis_file_is_self_contained(tmp_path, pipeline):
+    r = run(tmp_path, llm=LLM)
+    a = json.loads(r.analysis_path.read_text())
+    assert next(iter(a)) == "run"
+    run_block = a["run"]
+    assert run_block["run_id"] == RUN_ID
+    assert run_block["recorded_at"].startswith("2026-11-09T10:00:00")
+    assert run_block["duration_seconds"] == 60 and run_block["language"] == "fr"
+    assert run_block["station"]["name"] == "France Info"
+    assert set(run_block["station"]) >= {"latitude", "longitude", "location_precision", "countrycode"}
+
+
+def test_station_overrides_set_exact_location(tmp_path, pipeline):
+    r = run(tmp_path, station_overrides={"latitude": 48.85, "longitude": 2.27})
+    assert (r.station.latitude, r.station.longitude, r.station.location_precision) == (48.85, 2.27, "station")
+    region = {"latitude": 45.0, "longitude": 1.0, "location_precision": "subdivision",
+              "subdivision": "Nouvelle-Aquitaine"}
+    r2 = run(tmp_path / "b", station_overrides=region)
+    assert r2.station.location_precision == "subdivision" and r2.station.subdivision == "Nouvelle-Aquitaine"
+
+
+def test_invalid_station_overrides_fail_the_resolve_stage(tmp_path, pipeline):
+    r = run(tmp_path, station_overrides={"latitude": "north"})
+    assert r.statuses["resolve"] == "failed" and "station_overrides" in r.stages["resolve"].error

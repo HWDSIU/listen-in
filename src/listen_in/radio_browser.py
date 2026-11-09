@@ -13,6 +13,7 @@ import random
 import socket
 import threading
 from collections.abc import Sequence
+from typing import Literal
 
 import httpx
 
@@ -22,6 +23,7 @@ from .exceptions import (
     StationNotFoundError,
     StationResolutionError,
 )
+from .geo import country_reference_point
 from .models import Station
 from .utils import (
     USER_AGENT,
@@ -232,6 +234,14 @@ def _station_from_record(rec: dict, host: str) -> Station:
     except InvalidInputError as exc:
         raise StationResolutionError(f"Radio Browser returned an unusable stream URL: {exc}") from exc
     bitrate = rec.get("bitrate")
+    latitude, longitude = _coordinate(rec.get("geo_lat"), 90), _coordinate(rec.get("geo_long"), 180)
+    precision: Literal["station", "country"] | None = (
+        "station" if latitude is not None and longitude is not None else None
+    )
+    if precision is None:
+        fallback = country_reference_point(rec.get("countrycode"))
+        latitude, longitude = fallback if fallback else (None, None)
+        precision = "country" if fallback else None
     return Station(
         stream_url=stream_url,
         name=(rec.get("name") or "").strip(),
@@ -244,8 +254,9 @@ def _station_from_record(rec: dict, host: str) -> Station:
         countrycode=rec.get("countrycode") or None,
         subdivision=_text(rec.get("state")),
         subdivision_code=_text(rec.get("iso_3166_2")),
-        latitude=_coordinate(rec.get("geo_lat"), 90),
-        longitude=_coordinate(rec.get("geo_long"), 180),
+        latitude=latitude,
+        longitude=longitude,
+        location_precision=precision,
         language=rec.get("language") or None,
         language_codes=_split_list(rec.get("languagecodes"), lower=True),
         tags=_split_list(rec.get("tags")),

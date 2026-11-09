@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "HWDSIU" }]
-keywords = ["radio", "whisper", "transcription", "news", "monitoring", "databricks", "azure-openai"]
+keywords = ["radio", "whisper", "transcription", "translation", "news", "monitoring", "entity-extraction", "azure-openai"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -47,7 +47,7 @@ llm-openai = [
   "openai>=1.66",
 ]
 # Bundles a static ffmpeg binary via pip. Useful where OS packages cannot be
-# installed (locked-down laptops, Databricks serverless). A system ffmpeg is
+# installed (locked-down machines, managed notebook environments). A system ffmpeg is
 # still preferred when available.
 ffmpeg = [
   "imageio-ffmpeg>=0.5",

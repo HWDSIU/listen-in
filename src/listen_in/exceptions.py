@@ -52,7 +52,6 @@ Install it with one of:
   macOS:          brew install ffmpeg
   Ubuntu/Debian:  sudo apt-get install -y ffmpeg
   Windows:        winget install Gyan.FFmpeg   (or choco install ffmpeg)
-  Databricks:     add a cluster init script that runs `apt-get install -y ffmpeg`
   Any platform:   pip install "listen-in[ffmpeg]"   (bundled static binary)
 
 Or point listen-in at a binary explicitly:
