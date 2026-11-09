@@ -16,7 +16,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@main"
+# MAGIC %pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
 
 # COMMAND ----------
 

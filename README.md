@@ -59,15 +59,15 @@ The code is licensed under [Apache-2.0](LICENSE). Whisper and model weights carr
 
 Python 3.10 or later.
 
-```bash
-pip install "listen-in[whisper,llm-anthropic]"
-```
-
-Until the package is on PyPI, install from GitHub:
+listen-in is **not yet published on PyPI**, so install a tagged release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@main"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
 ```
+
+Pin to a release tag (see [tags](https://github.com/HWDSIU/listen-in/tags)) for
+reproducible installs, or use `@main` for the latest unreleased code. Once the package
+is on PyPI this will become `pip install "listen-in[whisper,llm-anthropic]"`.
 
 | Extra | Adds | Needed for |
 |---|---|---|
@@ -90,7 +90,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | `pip install "listen-in[ffmpeg]"` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then `$LISTEN_IN_FFMPEG`,
 then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -254,9 +254,12 @@ apt-get install -y ffmpeg
 Then in the notebook:
 
 ```python
-%pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@main"
+%pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
 dbutils.library.restartPython()
 ```
+
+Pin scheduled jobs to a release tag so they keep running the same code when `main`
+changes. To upgrade, change the tag.
 
 Serverless compute cannot run init scripts. The supported route there is the
 `ffmpeg` extra (`listen-in[whisper,llm-anthropic,ffmpeg]`), but it has not been
@@ -307,7 +310,7 @@ driver. Whisper is not run through Spark UDFs.
 
 | Symptom | Fix |
 |---|---|
-| `FFmpegNotFoundError` | Install ffmpeg (see above), set `CaptureOptions(ffmpeg_path=...)` or `$LISTEN_IN_FFMPEG`, or `pip install "listen-in[ffmpeg]"`. |
+| `FFmpegNotFoundError` | Install ffmpeg (see above), set `CaptureOptions(ffmpeg_path=...)` or `$LISTEN_IN_FFMPEG`, or reinstall with the `ffmpeg` extra (`listen-in[...,ffmpeg]`). |
 | `RadioBrowserUnavailableError` | Outbound HTTPS to `*.api.radio-browser.info` is blocked. Allow it, or pass the stream URL directly. |
 | `StreamUnavailableError` / "Recording too short" | The station is offline, geo-blocked or has changed its URL. Radio Browser records and stream URLs **change over time**; resolve again or choose another station. |
 | `CERTIFICATE_VERIFY_FAILED` while downloading Whisper weights | python.org builds on macOS have no CA bundle until you run *Install Certificates.command*. listen-in falls back to `certifi` automatically; behind a corporate proxy, set `SSL_CERT_FILE` to your organisation's CA bundle. |
