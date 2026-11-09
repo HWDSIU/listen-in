@@ -1,0 +1,319 @@
+"""Structured English news analysis of a transcript via a pluggable LLM provider.
+
+The first provider is Anthropic (Claude), using structured outputs constrained to
+the :class:`~listen_in.models.NewsAnalysis` JSON schema. Responses are validated
+with Pydantic; one invalid response gets a single repair retry.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
+
+from pydantic import SecretStr, ValidationError
+
+from .exceptions import (
+    AnalysisError,
+    AnalysisRefusedError,
+    ConfigurationError,
+    OptionalDependencyError,
+)
+from .models import AnalysisResult, LLMConfig, NewsAnalysis, Transcript
+from .utils import Stopwatch, redact
+
+log = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """\
+You analyse transcripts of radio broadcasts produced by automatic speech recognition \
+(Whisper). Your output is read by English-speaking analysts monitoring the news.
+
+Rules:
+- Use only the transcript. Do not add background, context or facts from your own \
+knowledge, and do not guess at events the transcript does not describe.
+- Write every field in English. If the broadcast is in another language, translate \
+faithfully and set translation_used to true.
+- Keep important names of people, organisations and places, spelt as heard. When a \
+name, number or passage is doubtful (likely recognition error, unclear audio), \
+record that in the story's uncertainties rather than silently correcting it.
+- Report claims as claims made in the broadcast ("the presenter said...", \
+"according to the bulletin..."), not as established fact.
+- Music, adverts, jingles, greetings, call-in chat, horoscopes and similar content \
+are not news. If there is no substantive news, set news_detected to false, return an \
+empty stories list, and use summary_en to describe briefly what the segment contained.
+- One story per distinct news item. summary_en gives a concise overview of the whole \
+segment."""
+
+
+def build_user_message(transcript: Transcript, station_name: str | None = None) -> str:
+    meta = [f"Broadcast language hint (ISO 639-1): {transcript.language or 'unknown'}"]
+    if station_name:
+        meta.append(f"Station: {station_name}")
+    if transcript.duration_seconds:
+        meta.append(f"Recording length: {transcript.duration_seconds:.0f} seconds")
+    return "\n".join(meta) + f"\n\n<transcript>\n{transcript.text}\n</transcript>"
+
+
+# ----------------------------------------------------------------- provider API
+@dataclass
+class LLMResponse:
+    text: str
+    stop_reason: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_id: str | None = None
+    refusal_detail: str | None = None
+    raw_content: list[Any] = field(default_factory=list, repr=False)
+
+
+@runtime_checkable
+class LLMProvider(Protocol):
+    """Minimal provider interface: return JSON text conforming to ``schema``."""
+
+    name: str
+
+    def complete_json(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, Any]],
+        schema: dict[str, Any],
+        config: LLMConfig,
+    ) -> LLMResponse: ...
+
+
+class AnthropicProvider:
+    """Claude via the official ``anthropic`` SDK with JSON-schema structured outputs."""
+
+    name = "anthropic"
+
+    def __init__(self, api_key: str, base_url: str | None = None, *,
+                 timeout: float = 120.0, max_retries: int = 2, http_client: Any = None) -> None:
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise OptionalDependencyError("anthropic", "llm-anthropic", "LLM analysis") from exc
+        self._anthropic = anthropic
+        kwargs: dict[str, Any] = {}
+        if http_client is not None:  # e.g. anthropic.DefaultHttpxClient(proxy=...) or a test transport
+            kwargs["http_client"] = http_client
+        self._client = anthropic.Anthropic(
+            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries, **kwargs
+        )
+
+    def complete_json(self, *, system, messages, schema, config) -> LLMResponse:
+        # Adapt the plain JSON schema to what Claude structured outputs accept.
+        strict_schema = self._anthropic.transform_schema(schema)
+        output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": strict_schema}}
+        if config.effort:
+            output_config["effort"] = config.effort
+        a = self._anthropic
+        try:
+            resp = self._client.messages.create(  # type: ignore[call-overload]  # provider-neutral dict messages
+                model=config.model,
+                max_tokens=config.max_tokens,
+                system=system,
+                messages=messages,
+                output_config=output_config,
+            )
+        except a.AuthenticationError as exc:
+            raise ConfigurationError("Anthropic rejected the API key (401).") from exc
+        except a.PermissionDeniedError as exc:
+            raise ConfigurationError(f"Anthropic denied access: {exc.message}") from exc
+        except a.NotFoundError as exc:
+            raise ConfigurationError(f"Unknown model or endpoint: {config.model!r}") from exc
+        except a.BadRequestError as exc:
+            raise AnalysisError(f"Anthropic rejected the request: {exc.message}") from exc
+        except a.RateLimitError as exc:
+            raise AnalysisError("Anthropic rate limit hit after retries (429).") from exc
+        except a.APIStatusError as exc:
+            raise AnalysisError(f"Anthropic API error {exc.status_code}: {exc.message}") from exc
+        except a.APIConnectionError as exc:
+            raise AnalysisError(f"Could not reach the Anthropic API: {exc}") from exc
+
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        refusal = None
+        if resp.stop_reason == "refusal":
+            details = getattr(resp, "stop_details", None)
+            refusal = (
+                f"category={getattr(details, 'category', None)}; "
+                f"{getattr(details, 'explanation', '') or ''}".strip()
+            )
+        usage = getattr(resp, "usage", None)
+        return LLMResponse(
+            text=text,
+            stop_reason=resp.stop_reason,
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+            request_id=getattr(resp, "_request_id", None),
+            refusal_detail=refusal,
+            # SDK block objects (incl. thinking blocks) are passed back unchanged on repair.
+            raw_content=list(resp.content),
+        )
+
+
+# ------------------------------------------------------------- provider registry
+ProviderFactory = Callable[[LLMConfig, str], LLMProvider]
+
+_PROVIDERS: dict[str, ProviderFactory] = {
+    "anthropic": lambda cfg, key: AnthropicProvider(
+        key, cfg.base_url, timeout=cfg.timeout_seconds, max_retries=cfg.max_retries
+    ),
+}
+
+
+def register_provider(name: str, factory: ProviderFactory) -> None:
+    """Register a custom provider factory ``(config, api_key) -> LLMProvider``."""
+    _PROVIDERS[name] = factory
+
+
+def available_providers() -> list[str]:
+    return sorted(_PROVIDERS)
+
+
+def coerce_llm_config(llm: LLMConfig | dict[str, Any]) -> LLMConfig:
+    if isinstance(llm, LLMConfig):
+        return llm
+    if not isinstance(llm, dict):
+        raise ConfigurationError("llm must be an LLMConfig or a dict.")
+    data = {k: v for k, v in llm.items() if v is not None}
+    try:
+        return LLMConfig(**data)
+    except ValidationError as exc:
+        raise ConfigurationError(f"Invalid llm settings: {exc.errors(include_input=False)}") from exc
+
+
+def resolve_api_key(config: LLMConfig) -> str:
+    if config.api_key is not None and config.api_key.get_secret_value():
+        return config.api_key.get_secret_value()
+    names = [config.api_key_env]
+    if config.provider == "anthropic":
+        names.append("ANTHROPIC_API_KEY")
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    raise ConfigurationError(
+        f"No API key: pass api_key or set one of {', '.join(dict.fromkeys(names))}."
+    )
+
+
+def get_provider(config: LLMConfig, api_key: str) -> LLMProvider:
+    factory = _PROVIDERS.get(config.provider)
+    if factory is None:
+        raise ConfigurationError(
+            f"Unknown LLM provider {config.provider!r}. Available: {', '.join(available_providers())}."
+        )
+    return factory(config, api_key)
+
+
+# ----------------------------------------------------------------------- analyse
+def _repair_instruction(error: str) -> str:
+    return (
+        "Your previous reply could not be used: " + error + "\n"
+        "Reply again with only a single JSON object that matches the required schema exactly. "
+        "Use only the transcript."
+    )
+
+
+def _validate(text: str) -> NewsAnalysis:
+    return NewsAnalysis.model_validate(json.loads(text))
+
+
+def analyse_transcript(
+    transcript: Transcript,
+    api_key: str | None = None,
+    provider: str = "anthropic",
+    model: str = "claude-haiku-5-5",
+    *,
+    base_url: str | None = None,
+    station_name: str | None = None,
+    config: LLMConfig | dict[str, Any] | None = None,
+    llm_provider: LLMProvider | None = None,
+) -> AnalysisResult:
+    """Summarise a transcript into a validated :class:`NewsAnalysis` (English).
+
+    ``api_key`` may be omitted to read ``$LLM_API_KEY`` (or ``$ANTHROPIC_API_KEY``).
+    Pass ``config`` for full control, or ``llm_provider`` to inject a custom client.
+    The transcript itself is never modified.
+    """
+    if config is None:
+        cfg = LLMConfig(provider=provider, model=model, base_url=base_url,
+                        api_key=SecretStr(api_key) if api_key else None)
+    else:
+        cfg = coerce_llm_config(config)
+        if api_key:
+            cfg = cfg.model_copy(update={"api_key": SecretStr(api_key)})
+    if not transcript.text.strip():
+        return AnalysisResult(
+            analysis=NewsAnalysis(
+                news_detected=False,
+                broadcast_language=transcript.language or "",
+                translation_used=False,
+                summary_en="The recording contained no recognisable speech.",
+                stories=[],
+            ),
+            provider=cfg.provider,
+            model=cfg.model,
+        )
+
+    key = None
+    if llm_provider is None:
+        key = resolve_api_key(cfg)
+        llm_provider = get_provider(cfg, key)
+    # Plain JSON schema; each provider adapts it to its own structured-output rules.
+    schema = NewsAnalysis.model_json_schema()
+
+    sw = Stopwatch()
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": build_user_message(transcript, station_name)}
+    ]
+    in_tok = out_tok = 0
+    request_ids: list[str] = []
+    last_error = ""
+    for attempt in range(2):  # first try + one repair retry
+        try:
+            resp = llm_provider.complete_json(
+                system=SYSTEM_PROMPT, messages=messages, schema=schema, config=cfg
+            )
+        except (AnalysisError, ConfigurationError):
+            raise
+        except Exception as exc:  # provider bugs/unknown errors -> AnalysisError, key-safe
+            raise AnalysisError(redact(f"{type(exc).__name__}: {exc}", [key])) from exc
+        in_tok += resp.input_tokens or 0
+        out_tok += resp.output_tokens or 0
+        if resp.request_id:
+            request_ids.append(resp.request_id)
+        if resp.stop_reason == "refusal":
+            raise AnalysisRefusedError(f"The model declined to analyse this transcript ({resp.refusal_detail}).")
+        if resp.stop_reason == "max_tokens":
+            raise AnalysisError(f"Response truncated at max_tokens={cfg.max_tokens}; raise LLMConfig.max_tokens.")
+        try:
+            analysis = _validate(resp.text)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            last_error = (
+                f"invalid JSON ({exc.msg})" if isinstance(exc, json.JSONDecodeError)
+                else f"schema validation failed: {exc.errors(include_input=False, include_url=False)}"
+            )
+            log.warning("Analysis attempt %d returned invalid output: %s", attempt + 1, last_error)
+            # Append-only repair turn: keep the model's own reply, then ask for a fix.
+            messages = [
+                *messages,
+                {"role": "assistant", "content": resp.raw_content or resp.text or "(empty)"},
+                {"role": "user", "content": _repair_instruction(last_error)},
+            ]
+            continue
+        return AnalysisResult(
+            analysis=analysis,
+            provider=cfg.provider,
+            model=cfg.model,
+            input_tokens=in_tok or None,
+            output_tokens=out_tok or None,
+            repaired=attempt > 0,
+            request_ids=request_ids,
+            processing_seconds=sw.seconds,
+        )
+    raise AnalysisError(f"LLM output was still invalid after one repair attempt: {last_error}")

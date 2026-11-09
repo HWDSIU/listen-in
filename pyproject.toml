@@ -1,0 +1,112 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "listen-in"
+dynamic = ["version"]
+description = "Record internet radio, transcribe it locally with Whisper, and summarise the news in English with an LLM."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "HWDSIU" }]
+keywords = ["radio", "whisper", "transcription", "news", "monitoring", "databricks"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "platformdirs>=4.2",
+]
+
+[project.optional-dependencies]
+whisper = [
+  "openai-whisper>=20240930",
+  "numpy>=1.24",
+  "certifi",
+]
+llm-anthropic = [
+  "anthropic>=2.6",
+]
+# Bundles a static ffmpeg binary via pip. Useful where OS packages cannot be
+# installed (locked-down laptops, Databricks serverless). A system ffmpeg is
+# still preferred when available.
+ffmpeg = [
+  "imageio-ffmpeg>=0.5",
+]
+all = [
+  "listen-in[whisper,llm-anthropic,ffmpeg]",
+]
+dev = [
+  "build",
+  "pytest>=8",
+  "pytest-cov",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/HWDSIU/listen-in"
+Issues = "https://github.com/HWDSIU/listen-in/issues"
+
+[tool.hatch.version]
+path = "src/listen_in/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/listen_in"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/listen_in",
+  "tests",
+  "examples",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  ".env.example",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not integration'"
+markers = [
+  "integration: live network tests (records real radio); opt in with RUN_LIVE_RADIO_TESTS=1 and -m integration",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE", "RUF"]
+ignore = [
+  "S603",  # subprocess without shell: arguments are built as a list and validated
+  "S607",  # partial executable path: ffmpeg is resolved/validated explicitly
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+"examples/**" = ["S108", "T201", "E402"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_ignores = true
+ignore_missing_imports = true

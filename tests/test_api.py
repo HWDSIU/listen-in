@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import timedelta
+
+import pytest
+
+from listen_in import api
+from listen_in.exceptions import (
+    AnalysisError,
+    ConfigurationError,
+    InvalidInputError,
+    StreamUnavailableError,
+    TranscriptionError,
+)
+from listen_in.models import (
+    AnalysisResult,
+    AudioCapture,
+    NewsAnalysis,
+    Station,
+    Transcript,
+)
+
+from .conftest import FAKE_KEY, FIXED_NOW, SWAHILI_HISTORY, SWAHILI_UUID, write_wav
+
+STATION = Station(
+    stream_url="https://radiojambo-atunwadigital.streamguys1.com/radiojambo",
+    name="Radio Jambo", source="radio_browser", uuid=SWAHILI_UUID,
+)
+RUN_ID = "radio-jambo_fc939579_20261109T100000Z"
+
+
+@pytest.fixture
+def pipeline(monkeypatch):
+    """Patch every external stage; tests flip individual stages to fail."""
+    state = {"capture_error": None, "transcribe_error": None, "analyse_error": None,
+             "calls": []}
+
+    def resolve(station, **kw):
+        state["calls"].append("resolve")
+        return STATION
+
+    def capture(st, duration, out_dir, *, options, overwrite, filename):
+        state["calls"].append("capture")
+        if state["capture_error"]:
+            raise state["capture_error"]
+        path = write_wav(out_dir / filename, 1)
+        return AudioCapture(path=path, station=st, started_at=FIXED_NOW,
+                            finished_at=FIXED_NOW + timedelta(seconds=duration),
+                            requested_duration_seconds=duration, duration_seconds=duration,
+                            sample_rate=16_000, channels=1, size_bytes=path.stat().st_size,
+                            ffmpeg_path="/usr/bin/ffmpeg")
+
+    def transcribe(path, *, language, model, device, initial_prompt):
+        state["calls"].append(("transcribe", language, model))
+        if state["transcribe_error"]:
+            raise state["transcribe_error"]
+        return Transcript(text="Habari za saa saba.", language=language, model=model,
+                          device="cpu", audio_path=path)
+
+    def analyse(transcript, *, config, station_name):
+        state["calls"].append(("analyse", config.model, station_name))
+        state["llm_config"] = config
+        if state["analyse_error"]:
+            raise state["analyse_error"]
+        return AnalysisResult(
+            analysis=NewsAnalysis(news_detected=True, broadcast_language="sw",
+                                  translation_used=True, summary_en="Bulletin.", stories=[]),
+            provider=config.provider, model=config.model,
+        )
+
+    monkeypatch.setattr(api, "resolve_station", resolve)
+    monkeypatch.setattr(api, "capture_stream", capture)
+    monkeypatch.setattr(api, "transcribe_audio", transcribe)
+    monkeypatch.setattr(api, "analyse_transcript", analyse)
+    monkeypatch.setattr(api, "utc_now", lambda: FIXED_NOW)
+    return state
+
+
+def run(tmp_path, **kw):
+    kw.setdefault("llm", None)
+    return api.process_station(SWAHILI_HISTORY, "sw", 60, tmp_path / "out",
+                               staging_dir=tmp_path / "staging", **kw)
+
+
+def test_transcription_only_when_llm_none(tmp_path, pipeline):
+    r = run(tmp_path)
+    assert r.ok
+    assert r.statuses == {"resolve": "ok", "capture": "ok", "transcribe": "ok",
+                          "analyse": "skipped", "persist": "ok"}
+    assert r.run_id == RUN_ID
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == ["analysis", "audio", "manifests", "transcripts"]
+    assert (out / "audio" / f"{RUN_ID}.wav").exists()
+    assert (out / "transcripts" / f"{RUN_ID}.json").exists()
+    assert (out / "transcripts" / f"{RUN_ID}.txt").read_text().startswith("Habari")
+    assert list((out / "analysis").iterdir()) == []
+    manifest = json.loads((out / "manifests" / f"{RUN_ID}.json").read_text())
+    assert manifest["stages"]["analyse"]["status"] == "skipped"
+    assert manifest["llm"] is None
+    assert not any(p.suffix == ".wav" for p in (tmp_path / "staging").rglob("*"))  # staging cleaned
+
+
+def test_full_run_with_llm_never_writes_key(tmp_path, pipeline):
+    r = run(tmp_path, llm={"provider": "anthropic", "model": "claude-haiku-5-5", "api_key": FAKE_KEY})
+    assert r.ok and r.statuses["analyse"] == "ok"
+    assert ("analyse", "claude-haiku-5-5", "Radio Jambo") in pipeline["calls"]
+    assert pipeline["llm_config"].api_key.get_secret_value() == FAKE_KEY  # passed through
+    assert r.analysis_path.exists()
+    for path in (tmp_path / "out").rglob("*.json"):
+        assert FAKE_KEY not in path.read_text(), path
+    assert FAKE_KEY not in r.model_dump_json()
+    assert FAKE_KEY not in repr(r)
+    assert "api_key" not in r.llm
+
+
+def test_api_key_read_from_env(tmp_path, pipeline, monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", FAKE_KEY)
+    r = run(tmp_path, llm={"model": "claude-haiku-5-5"})
+    assert r.statuses["analyse"] == "ok"
+    assert FAKE_KEY not in r.manifest_path.read_text()
+
+
+def test_analysis_failure_preserves_transcript(tmp_path, pipeline):
+    pipeline["analyse_error"] = AnalysisError(f"bad gateway {FAKE_KEY}")
+    r = run(tmp_path, llm={"api_key": FAKE_KEY})
+    assert not r.ok
+    assert r.statuses["analyse"] == "failed"
+    assert r.transcript_path.exists() and r.audio_path.exists()
+    assert FAKE_KEY not in r.stages["analyse"].error
+    assert "[REDACTED]" in r.stages["analyse"].error
+    assert r.manifest_path.exists()
+
+
+def test_capture_failure_skips_later_stages(tmp_path, pipeline):
+    pipeline["capture_error"] = StreamUnavailableError("404 Not Found")
+    r = run(tmp_path, llm={"api_key": FAKE_KEY})
+    assert r.statuses == {"resolve": "ok", "capture": "failed", "transcribe": "skipped",
+                          "analyse": "skipped", "persist": "ok"}
+    assert "404" in r.stages["capture"].error
+    assert r.manifest_path.exists()
+
+
+def test_transcription_failure_keeps_audio(tmp_path, pipeline):
+    pipeline["transcribe_error"] = TranscriptionError("model load failed")
+    r = run(tmp_path)
+    assert r.statuses["transcribe"] == "failed"
+    assert r.audio_path.exists()
+
+
+def test_missing_key_fails_fast_before_capture(tmp_path, pipeline):
+    with pytest.raises(ConfigurationError):
+        run(tmp_path, llm={"model": "claude-haiku-5-5"})
+    assert pipeline["calls"] == []
+
+
+def test_invalid_arguments_fail_fast(tmp_path, pipeline):
+    with pytest.raises(InvalidInputError):
+        api.process_station(SWAHILI_HISTORY, "sw", 0, tmp_path / "out")
+    with pytest.raises(InvalidInputError):
+        api.process_station(SWAHILI_HISTORY, "sw", 60, "s3://bucket/path")
+    assert pipeline["calls"] == []
+
+
+def test_language_hint_passed_to_whisper(tmp_path, pipeline):
+    run(tmp_path)
+    assert ("transcribe", "sw", "small") in pipeline["calls"]
+
+
+def test_keep_audio_false_removes_wav(tmp_path, pipeline):
+    r = run(tmp_path, keep_audio=False)
+    assert r.audio_path is None
+    assert list((tmp_path / "out" / "audio").iterdir()) == []
+    assert r.transcript_path.exists()
+
+
+def test_existing_outputs_not_overwritten(tmp_path, pipeline):
+    run(tmp_path)
+    r2 = run(tmp_path)  # same fixed clock -> same run id -> files exist
+    assert r2.statuses["capture"] == "failed"
+    assert "already exists" in r2.stages["capture"].error
+
+
+def test_base_import_does_not_load_optional_dependencies():
+    code = ("import sys, listen_in; "
+            "print(sorted(m for m in ('whisper','torch','anthropic') if m in sys.modules))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"
