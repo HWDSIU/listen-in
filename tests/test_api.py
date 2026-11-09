@@ -21,6 +21,8 @@ from listen_in.models import (
     NewsAnalysis,
     Station,
     Transcript,
+    TranslatedSegment,
+    Translation,
 )
 
 from .conftest import FAKE_KEY, FIXED_NOW, FRENCH_HISTORY, FRENCH_UUID, write_wav
@@ -36,7 +38,7 @@ RUN_ID = "france-info_31074f8a_20261109T100000Z"
 def pipeline(monkeypatch):
     """Patch every external stage; tests flip individual stages to fail."""
     state = {"capture_error": None, "transcribe_error": None, "analyse_error": None,
-             "calls": []}
+             "translate_error": None, "calls": []}
 
     def resolve(station, **kw):
         state["calls"].append("resolve")
@@ -53,8 +55,9 @@ def pipeline(monkeypatch):
                             sample_rate=16_000, channels=1, size_bytes=path.stat().st_size,
                             ffmpeg_path="/usr/bin/ffmpeg")
 
-    def transcribe(path, *, language, model, device, initial_prompt):
+    def transcribe(path, *, language, model, device, initial_prompt, on_language_mismatch):
         state["calls"].append(("transcribe", language, model))
+        state["on_language_mismatch"] = on_language_mismatch
         if state["transcribe_error"]:
             raise state["transcribe_error"]
         return Transcript(text="Il est treize heures.", language=language, model=model,
@@ -74,7 +77,16 @@ def pipeline(monkeypatch):
     monkeypatch.setattr(api, "resolve_station", resolve)
     monkeypatch.setattr(api, "capture_stream", capture)
     monkeypatch.setattr(api, "transcribe_audio", transcribe)
+    def translate(transcript, *, config):
+        state["calls"].append(("translate", transcript.language))
+        if state["translate_error"]:
+            raise state["translate_error"]
+        seg = TranslatedSegment(id=0, start=0.0, end=2.0, text=transcript.text, text_en="It is one o'clock.")
+        return Translation(source_language=transcript.language, segments=[seg], text_en=seg.text_en,
+                           provider=config.provider, model=config.model)
+
     monkeypatch.setattr(api, "analyse_transcript", analyse)
+    monkeypatch.setattr(api, "translate_transcript", translate)
     monkeypatch.setattr(api, "utc_now", lambda: FIXED_NOW)
     return state
 
@@ -89,7 +101,8 @@ def test_transcription_only_when_llm_none(tmp_path, pipeline):
     r = run(tmp_path)
     assert r.ok
     assert r.statuses == {"resolve": "ok", "capture": "ok", "transcribe": "ok",
-                          "analyse": "skipped", "persist": "ok"}
+                          "translate": "skipped", "analyse": "skipped", "persist": "ok"}
+    assert r.stages["translate"].detail == "no LLM configured"
     assert r.run_id == RUN_ID
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == ["analysis", "audio", "manifests", "transcripts"]
@@ -138,7 +151,7 @@ def test_capture_failure_skips_later_stages(tmp_path, pipeline):
     pipeline["capture_error"] = StreamUnavailableError("404 Not Found")
     r = run(tmp_path, llm={"api_key": FAKE_KEY})
     assert r.statuses == {"resolve": "ok", "capture": "failed", "transcribe": "skipped",
-                          "analyse": "skipped", "persist": "ok"}
+                          "translate": "skipped", "analyse": "skipped", "persist": "ok"}
     assert "404" in r.stages["capture"].error
     assert r.manifest_path.exists()
 
@@ -175,6 +188,12 @@ def test_persist_time_recorded_in_manifest(tmp_path, pipeline):
 def test_language_hint_passed_to_whisper(tmp_path, pipeline):
     run(tmp_path)
     assert ("transcribe", "fr", "small") in pipeline["calls"]
+    assert pipeline["on_language_mismatch"] == "use_detected"
+
+
+def test_language_mismatch_policy_passed_through(tmp_path, pipeline):
+    run(tmp_path, on_language_mismatch="error")
+    assert pipeline["on_language_mismatch"] == "error"
 
 
 def test_keep_audio_false_removes_wav(tmp_path, pipeline):
@@ -196,3 +215,54 @@ def test_base_import_does_not_load_optional_dependencies():
             "print(sorted(m for m in ('whisper','torch','anthropic','openai') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
+
+
+# ------------------------------------------------------------------ translation
+LLM = {"provider": "anthropic", "model": "claude-haiku-5-5", "api_key": FAKE_KEY}
+
+
+def test_non_english_broadcast_is_translated_and_stored_side_by_side(tmp_path, pipeline):
+    r = run(tmp_path, llm=LLM)
+    assert r.ok and r.statuses["translate"] == "ok"
+    assert ("translate", "fr") in pipeline["calls"]
+    assert r.translation_path.name == f"{RUN_ID}.en.txt"
+    assert r.translation_path.read_text().strip() == "It is one o'clock."
+    # Original transcript is untouched and still saved separately.
+    assert (tmp_path / "out" / "transcripts" / f"{RUN_ID}.txt").read_text().startswith("Il est")
+    analysis = json.loads(r.analysis_path.read_text())
+    block = analysis["transcript"]
+    assert block["language"] == "fr" and block["translated"] is True
+    assert block["text"] == "Il est treize heures."
+    assert block["text_en"] == "It is one o'clock."
+    assert block["segments"][0] == {"id": 0, "start": 0.0, "end": 2.0,
+                                    "text": "Il est treize heures.", "text_en": "It is one o'clock."}
+    manifest = json.loads(r.manifest_path.read_text())
+    assert manifest["translation"]["text_en"] == "It is one o'clock."
+    assert FAKE_KEY not in r.translation_path.read_text() + r.analysis_path.read_text()
+
+
+def test_english_broadcast_skips_translation_but_fills_text_en(tmp_path, pipeline):
+    r = api.process_station(FRENCH_HISTORY, "en", 60, tmp_path / "out",
+                            staging_dir=tmp_path / "staging", llm=LLM)
+    assert r.statuses["translate"] == "skipped"
+    assert r.stages["translate"].detail == "broadcast is already in English"
+    assert not any(c[0] == "translate" for c in pipeline["calls"] if isinstance(c, tuple))
+    block = json.loads(r.analysis_path.read_text())["transcript"]
+    assert block["translated"] is False and block["text_en"] == block["text"]
+
+
+def test_translate_false_turns_it_off(tmp_path, pipeline):
+    r = run(tmp_path, llm=LLM, translate=False)
+    assert r.statuses["translate"] == "skipped" and r.stages["translate"].detail == "translate=False"
+    assert r.translation is None
+    assert json.loads(r.analysis_path.read_text())["transcript"]["text_en"] is None
+
+
+def test_translation_failure_keeps_transcript_and_analysis(tmp_path, pipeline):
+    pipeline["translate_error"] = AnalysisError("still invalid after one repair attempt")
+    r = run(tmp_path, llm=LLM)
+    assert r.statuses["translate"] == "failed" and r.statuses["analyse"] == "ok"
+    assert not r.ok
+    assert r.transcript_path.exists()
+    block = json.loads(r.analysis_path.read_text())["transcript"]
+    assert block["text"] == "Il est treize heures." and block["text_en"] is None

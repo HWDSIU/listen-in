@@ -77,7 +77,9 @@ def test_prompt_requires_transcript_only_and_empty_stories():
     assert "spelt as heard" in SYSTEM_PROMPT
     msg = build_user_message(transcript(), "France Info")
     assert "Station: France Info" in msg
-    assert "(ISO 639-1): fr" in msg
+    assert "Transcript language (ISO 639-1): fr" in msg
+    detected = transcript().model_copy(update={"detected_language": "fr", "detected_language_probability": 0.97})
+    assert "fr (detected by Whisper, 97% confidence)" in build_user_message(detected)
     assert "<transcript>\nIl est treize heures." in msg
 
 

@@ -14,15 +14,28 @@ import threading
 import wave
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from .exceptions import InvalidInputError, OptionalDependencyError, TranscriptionError
+from .exceptions import (
+    InvalidInputError,
+    LanguageMismatchError,
+    OptionalDependencyError,
+    TranscriptionError,
+)
 from .models import AudioCapture, Transcript, TranscriptSegment
 from .utils import Stopwatch
 
 log = logging.getLogger(__name__)
 
 _MODELS: dict[tuple[str, str, str | None], Any] = {}
+
+LanguageMismatchPolicy = Literal["use_detected", "use_hint", "error"]
+#: Whisper's language ID looks at 30 s at a time; we average several windows so a
+#: jingle or an advert in another language does not decide on its own.
+DETECTION_WINDOWS = 5
+#: A hint is overridden only when detection is confident AND gives the hint almost no weight.
+MISMATCH_MIN_DETECTED_PROBABILITY = 0.5
+MISMATCH_MAX_HINT_PROBABILITY = 0.1
 _MODELS_LOCK = threading.Lock()
 
 
@@ -110,12 +123,36 @@ def _load_audio(path: Path, whisper: Any, np: Any) -> tuple[Any, float | None]:
     return whisper.load_audio(str(path)), None
 
 
+def _language_probabilities(m: Any, samples: Any, whisper: Any,
+                            windows: int = DETECTION_WINDOWS) -> dict[str, float] | None:
+    """Average Whisper language-ID probabilities over up to ``windows`` 30 s windows."""
+    n = 30 * 16_000
+    total = len(samples)
+    if total == 0:
+        return None
+    if total <= n:
+        starts = [0]
+    else:
+        k = max(1, windows)
+        starts = sorted({round(i * (total - n) / max(1, k - 1)) for i in range(k)})
+    sums: dict[str, float] = {}
+    for start in starts:
+        chunk = whisper.pad_or_trim(samples[start:start + n])
+        mel = whisper.log_mel_spectrogram(chunk, n_mels=m.dims.n_mels).to(m.device)
+        _, probs = m.detect_language(mel)
+        probs = probs if isinstance(probs, dict) else probs[0]
+        for lang, p in probs.items():
+            sums[lang] = sums.get(lang, 0.0) + float(p)
+    return {lang: p / len(starts) for lang, p in sums.items()}
+
+
 def transcribe_audio(
     audio: str | Path | AudioCapture,
     language: str | None = None,
     model: str = "small",
     device: str = "auto",
     *,
+    on_language_mismatch: LanguageMismatchPolicy = "use_detected",
     download_root: str | None = None,
     initial_prompt: str | None = None,
     condition_on_previous_text: bool = False,
@@ -123,10 +160,19 @@ def transcribe_audio(
 ) -> Transcript:
     """Transcribe an audio file in its original language (never translates).
 
-    ``language`` is an ISO 639-1 hint such as ``"fr"`` or ``"en"``; ``None`` lets
-    Whisper detect it. ``model`` is any openai-whisper model name: ``"small"`` (default)
-    suits English, French and most widely spoken languages; ``"turbo"`` is recommended
-    for less widely spoken languages such as Swahili (best on GPU or 16 GB+ RAM).
+    ``language`` is an ISO 639-1 hint such as ``"fr"`` or ``"en"``; ``None`` uses the
+    detected language. Whisper treats its language setting as an instruction, not a
+    hint: given the wrong language it quietly *translates* into it. So the hint is
+    checked first with Whisper's language ID over several windows of the audio. If
+    detection is confident (>= 50 %) and gives the hint almost no weight (< 10 %),
+    ``on_language_mismatch`` decides: ``"use_detected"`` (default; keeps the original
+    language and logs a warning), ``"use_hint"`` or ``"error"``. The outcome is
+    recorded on the transcript (``language_hint``, ``detected_language``,
+    ``language_mismatch``).
+
+    ``model`` is any openai-whisper model name: ``"small"`` (default) suits English,
+    French and most widely spoken languages; ``"turbo"`` is recommended for less widely
+    spoken languages such as Swahili (best on GPU or 16 GB+ RAM).
     ``condition_on_previous_text`` defaults to False because radio audio mixes music
     and speech and conditioning makes repetition loops likelier.
     """
@@ -141,14 +187,47 @@ def transcribe_audio(
         if language not in whisper.tokenizer.LANGUAGES:
             raise InvalidInputError(f"Unsupported Whisper language code: {language!r}")
 
+    if on_language_mismatch not in ("use_detected", "use_hint", "error"):
+        raise InvalidInputError(f"on_language_mismatch must be use_detected, use_hint or error, "
+                                f"not {on_language_mismatch!r}")
+
     sw = Stopwatch()
     m = load_whisper_model(model, device, download_root)
     dev = str(getattr(m, "device", device))
     samples, seconds = _load_audio(path, whisper, np)
+
+    # Check the hint against what is actually spoken (see docstring).
+    detected: str | None = None
+    detected_p: float | None = None
+    mismatch = False
+    use_language = language
+    try:
+        probs = _language_probabilities(m, samples, whisper)
+    except Exception as exc:  # noqa: BLE001 - detection is advisory; never block transcription
+        log.warning("Language detection failed (%s); using language=%r as given.", exc, language)
+        probs = None
+    if probs:
+        detected, detected_p = max(probs.items(), key=lambda kv: kv[1])
+        if language is None:
+            use_language = detected
+        elif detected != language:
+            hint_p = probs.get(language, 0.0)
+            if detected_p >= MISMATCH_MIN_DETECTED_PROBABILITY and hint_p < MISMATCH_MAX_HINT_PROBABILITY:
+                mismatch = True
+                msg = (f"Language hint {language!r} does not match the audio: Whisper detected "
+                       f"{detected!r} ({detected_p:.0%}) and gives {language!r} {hint_p:.0%}.")
+                if on_language_mismatch == "error":
+                    raise LanguageMismatchError(msg)
+                if on_language_mismatch == "use_detected":
+                    log.warning("%s Transcribing in %r to keep the original language.", msg, detected)
+                    use_language = detected
+                else:
+                    log.warning("%s Using the hint as requested; the text may be a translation.", msg)
+
     try:
         result = m.transcribe(
             samples,
-            language=language,
+            language=use_language,
             task="transcribe",
             fp16=dev.startswith("cuda"),
             initial_prompt=initial_prompt,
@@ -173,7 +252,11 @@ def transcribe_audio(
     ]
     return Transcript(
         text=str(result.get("text", "")).strip(),
-        language=language or str(result.get("language") or ""),
+        language=use_language or str(result.get("language") or ""),
+        language_hint=language,
+        detected_language=detected,
+        detected_language_probability=round(detected_p, 4) if detected_p is not None else None,
+        language_mismatch=mismatch,
         segments=segments,
         model=model,
         device=dev,

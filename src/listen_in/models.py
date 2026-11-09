@@ -116,7 +116,16 @@ class Transcript(_Model):
     """Original-language Whisper transcript with timestamped segments."""
 
     text: str
-    language: str = Field(description="Language hint passed to Whisper (ISO 639-1).")
+    language: str = Field(description="Language Whisper transcribed in (ISO 639-1).")
+    language_hint: str | None = Field(default=None, description="Language requested by the caller, if any.")
+    detected_language: str | None = Field(
+        default=None, description="Language detected by Whisper across several windows of the audio."
+    )
+    detected_language_probability: float | None = None
+    language_mismatch: bool = Field(
+        default=False,
+        description="True when the hint clearly disagreed with the detected language.",
+    )
     segments: list[TranscriptSegment] = Field(default_factory=list)
     model: str
     device: str
@@ -228,10 +237,54 @@ class LLMConfig(_Model):
         return self
 
 
+class TranslatedSegment(_Model):
+    """One Whisper segment with its original text and English translation."""
+
+    id: int
+    start: float
+    end: float
+    text: str = Field(description="Original-language text.")
+    text_en: str | None = Field(default=None, description="English translation (None if unavailable).")
+
+
+class Translation(_Model):
+    """Segment-by-segment English translation of a transcript."""
+
+    source_language: str
+    target_language: Literal["en"] = "en"
+    segments: list[TranslatedSegment] = Field(default_factory=list)
+    text_en: str = Field(description="The full English translation.")
+    provider: str
+    model: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    repaired: bool = False
+    request_ids: list[str] = Field(default_factory=list)
+    processing_seconds: float | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BilingualTranscript(_Model):
+    """Original transcript and English side by side, as stored with the analysis."""
+
+    language: str = Field(description="Language of the original transcript (ISO 639-1).")
+    translated: bool = Field(
+        description="True if text_en is a translation; False if the broadcast was already "
+        "English (text_en is then the original) or no translation is available."
+    )
+    text: str = Field(description="Original-language transcript.")
+    text_en: str | None = Field(default=None, description="English text (None if unavailable).")
+    segments: list[TranslatedSegment] = Field(default_factory=list)
+
+
 class AnalysisResult(_Model):
     """A validated :class:`NewsAnalysis` plus non-secret call metadata."""
 
     analysis: NewsAnalysis
+    transcript: BilingualTranscript | None = Field(
+        default=None,
+        description="Original transcript with its English translation; added by process_station.",
+    )
     provider: str
     model: str
     input_tokens: int | None = None
@@ -247,6 +300,7 @@ class StageResult(_Model):
     status: StageStatus = "pending"
     seconds: float | None = None
     error: str | None = Field(default=None, description="Non-secret error description.")
+    detail: str | None = Field(default=None, description="Why a stage was skipped, if it was.")
 
 
 class ProcessingResult(_Model):
@@ -265,13 +319,15 @@ class ProcessingResult(_Model):
     audio_path: Path | None = None
     transcript: Transcript | None = None
     transcript_path: Path | None = None
+    translation: Translation | None = None
+    translation_path: Path | None = Field(default=None, description="English transcript (.en.txt).")
     analysis: AnalysisResult | None = None
     analysis_path: Path | None = None
     manifest_path: Path | None = None
     llm: dict[str, Any] | None = Field(default=None, description="Non-secret LLM settings used.")
     stages: dict[str, StageResult] = Field(
         default_factory=lambda: {
-            s: StageResult() for s in ("resolve", "capture", "transcribe", "analyse", "persist")
+            s: StageResult() for s in ("resolve", "capture", "transcribe", "translate", "analyse", "persist")
         }
     )
 

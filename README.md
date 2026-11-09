@@ -19,7 +19,7 @@ print(result.statuses)
 print(result.analysis.analysis.summary_en)
 ```
 
-> **Status:** alpha (0.2.0). The API may change before 1.0.
+> **Status:** alpha (0.3.0). The API may change before 1.0.
 
 [![tests](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml/badge.svg)](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml)
 
@@ -32,7 +32,9 @@ print(result.analysis.analysis.summary_en)
   timestamped segments and never uses Whisper's translate mode.
 - Optionally sends the transcript to an LLM. The model returns JSON (validated with
   Pydantic) with an English summary and a list of stories with people,
-  organisations, locations, key claims and uncertainties.
+  organisations, locations, key claims and uncertainties. Non-English broadcasts are
+  also translated into English **segment by segment**, alongside the original text
+  and timestamps.
 - Writes audio, transcripts, analysis and a per-run JSON **manifest** to a local
   folder or a Databricks Unity Catalog Volume.
 
@@ -62,7 +64,7 @@ Python 3.10 or later.
 listen-in is **not yet published on PyPI**, so install a tagged release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0"
 ```
 
 Swap `llm-anthropic` for `llm-openai` to use OpenAI or Azure OpenAI / AI Foundry (or
@@ -92,7 +94,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then `$LISTEN_IN_FFMPEG`,
 then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -127,6 +129,22 @@ process_station(station, language="en", whisper_model="small", ...)
 # Less widely spoken languages, ideally on GPU
 process_station(station, language="sw", whisper_model="turbo", ...)
 ```
+
+### Language hints
+
+`language=` takes an ISO 639-1 code (`"en"`, `"fr"`, `"de"`, `"sw"`...) or `None` to
+detect it. Whisper treats its language setting as an instruction, not a hint: given
+the wrong language, it quietly **translates** the speech into that language, and the
+original wording is lost. So listen-in checks the hint first, running Whisper's
+language detection over several 30-second windows of the recording. If detection is
+confident (at least 50 %) and gives the hint almost no weight (under 10 %), the
+recording is transcribed in the detected language and a warning is logged.
+`on_language_mismatch="use_hint"` keeps your hint anyway, and `"error"` stops instead.
+
+The transcript records what happened: `language` (what Whisper transcribed in),
+`language_hint`, `detected_language`, `detected_language_probability` and
+`language_mismatch`. A correct hint is never overridden by short stretches of another
+language, such as adverts or quotes in English.
 
 ### First run downloads Whisper weights
 
@@ -190,7 +208,36 @@ earlier artefacts. If analysis fails, for example, the transcript is still saved
 
 You can also call `analyse_transcript(transcript, api_key=..., model="claude-haiku-5-5")` directly.
 
-Analysis schema:
+#### Original transcript and English translation
+
+When an `llm` is configured and the broadcast isn't English, `process_station` also
+translates the transcript into English, one Whisper segment at a time. Use the same
+`llm` settings; `translate=False` turns it off. The original is never replaced:
+
+- `transcripts/<run>.txt`: the original-language transcript
+- `transcripts/<run>.en.txt`: the English translation
+- the analysis file and manifest carry both side by side, per segment with timestamps:
+
+```json
+"transcript": {
+  "language": "fr",
+  "translated": true,
+  "text": "Il est treize heures. Le prix du carburant augmente. ...",
+  "text_en": "It is one o'clock. The price of fuel is rising. ...",
+  "segments": [
+    {"id": 0, "start": 0.0, "end": 2.5, "text": "Il est treize heures.", "text_en": "It is one o'clock."}
+  ]
+}
+```
+
+For English broadcasts no translation call is made: `text_en` is the original and
+`translated` is `false`. In Python the same data is available as
+`result.translation` (segments, `text_en`) and `result.analysis.transcript`. To
+translate a transcript on its own, call `translate_transcript(transcript, ...)`. It
+takes the same provider settings as `analyse_transcript`. Names are kept as heard,
+and unclear passages are marked `[unclear]`.
+
+Analysis schema (in addition to the `transcript` block above):
 
 ```json
 {
@@ -271,7 +318,7 @@ if capture or transcription fails.
 ```text
 output/
 ├── audio/        france-info_31074f8a_20261109T100000Z.wav
-├── transcripts/  france-info_31074f8a_20261109T100000Z.json  (+ .txt)
+├── transcripts/  france-info_31074f8a_20261109T100000Z.json  (+ .txt original, .en.txt English)
 ├── analysis/     france-info_31074f8a_20261109T100000Z.json
 └── manifests/    france-info_31074f8a_20261109T100000Z.json
 ```
@@ -295,7 +342,7 @@ apt-get install -y ffmpeg
 Then in the notebook:
 
 ```python
-%pip install "listen-in[whisper,llm-openai] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
+%pip install "listen-in[whisper,llm-openai] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0"
 dbutils.library.restartPython()
 ```
 
@@ -367,6 +414,7 @@ driver. Whisper is not run through Spark UDFs.
 | `CERTIFICATE_VERIFY_FAILED` while downloading Whisper weights | python.org builds on macOS have no CA bundle until you run *Install Certificates.command*. listen-in falls back to `certifi` automatically; behind a corporate proxy, set `SSL_CERT_FILE` to your organisation's CA bundle. |
 | Transcription is very slow | CPU Whisper is roughly real-time or slower for `small` on a laptop. Use a CUDA GPU, a smaller model (`base`, `tiny`) or shorter recordings. |
 | Names or words are garbled | Smaller Whisper models are weaker on lower-resource languages, phone-ins and music beds. Try `turbo`, `medium` or `large-v3`, or pass `initial_prompt=` with expected names. The LLM records doubtful names under `uncertainties`. |
+| Transcript is in the wrong language (e.g. English text for a German station) | The `language` hint was wrong, and Whisper translated into it. Since 0.3.0 a clearly wrong hint is replaced by the detected language (`transcript.language_mismatch` is `true`). Pass the right code or `language=None`. |
 | `ConfigurationError: No API key` | Pass `api_key=` or set `LLM_API_KEY` (or the provider's own variable: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`). |
 | Azure: `could not find deployment ... (404)` | `model` must be the **deployment name**, `base_url` the resource endpoint (`https://<resource>.openai.azure.com`, no path), and `api_version` one your resource supports. |
 | Azure/OpenAI: request rejected mentioning `response_format` / `json_schema` | The deployment does not support JSON-schema structured outputs; add `"structured_output": "json_object"` to `llm`. |

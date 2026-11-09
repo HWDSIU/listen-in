@@ -89,7 +89,7 @@ def main() -> int:
             secs = f"{info.seconds:.1f}s" if info.seconds is not None else ""
             err = f"  {info.error}" if info.error else ""
             print(f"  {stage:10} {info.status:8} {secs}{err}")
-        for name in ("audio_path", "transcript_path", "analysis_path", "manifest_path"):
+        for name in ("audio_path", "transcript_path", "translation_path", "analysis_path", "manifest_path"):
             value = getattr(result, name)
             if value:
                 print(f"  {name:16} {value}")

@@ -1,7 +1,8 @@
 """Public functional API.
 
 Individual steps can be called directly (``resolve_station``, ``capture_stream``,
-``transcribe_audio``, ``analyse_transcript``) or chained with ``process_station``.
+``transcribe_audio``, ``translate_transcript``, ``analyse_transcript``) or chained
+with ``process_station``.
 No function here starts a scheduler, a Spark session or a background thread.
 """
 
@@ -18,10 +19,20 @@ from ._version import __version__
 from .analysis import analyse_transcript, coerce_llm_config, resolve_api_key
 from .capture import capture_stream, probe_stream
 from .exceptions import InvalidInputError
-from .models import CaptureOptions, LLMConfig, ProcessingResult, Station
+from .models import (
+    BilingualTranscript,
+    CaptureOptions,
+    LLMConfig,
+    ProcessingResult,
+    Station,
+    Transcript,
+    TranslatedSegment,
+    Translation,
+)
 from .radio_browser import resolve_station
 from .storage import OutputLayout, default_staging_dir, publish_file, write_json, write_text
-from .transcription import transcribe_audio
+from .transcription import LanguageMismatchPolicy, transcribe_audio
+from .translation import translate_transcript
 from .utils import (
     Stopwatch,
     build_run_id,
@@ -41,6 +52,7 @@ __all__ = [
     "process_station",
     "resolve_station",
     "transcribe_audio",
+    "translate_transcript",
 ]
 
 
@@ -58,21 +70,32 @@ def process_station(
     overwrite: bool = False,
     keep_audio: bool = True,
     initial_prompt: str | None = None,
+    on_language_mismatch: LanguageMismatchPolicy = "use_detected",
+    translate: bool = True,
 ) -> ProcessingResult:
-    """Resolve -> record -> transcribe -> (optionally) analyse -> persist, for one station.
+    """Resolve -> record -> transcribe -> translate -> analyse -> persist, for one station.
+
+    With an ``llm`` configured, a non-English transcript is also translated into
+    English segment by segment (``translate=False`` turns this off) and the analysis
+    file carries the original and English transcript side by side.
 
     Stage failures do not raise: they are recorded in ``result.stages`` and every
     artefact produced before the failure is kept. A JSON manifest is always written
     to ``<output_dir>/manifests/``. Invalid arguments raise immediately, before any
     recording starts. Pass ``llm=None`` for transcription only.
 
-    ``whisper_model`` defaults to ``"small"``; use ``"turbo"`` for less widely spoken
-    languages such as Swahili (see the README's "Choosing a Whisper model").
+    ``language`` is checked against the audio before transcribing; a clearly wrong
+    hint is replaced by the detected language unless ``on_language_mismatch`` says
+    otherwise (see :func:`transcribe_audio`). ``whisper_model`` defaults to ``"small"``;
+    use ``"turbo"`` for less widely spoken languages such as Swahili (see the README's
+    "Choosing a Whisper model").
     """
     options = capture_options or CaptureOptions()
     duration = validate_duration(duration_seconds, options.max_duration_seconds)
     if language is not None and (not isinstance(language, str) or not language.strip()):
-        raise InvalidInputError("language must be an ISO 639-1 code such as 'fr' or 'en', or None.")
+        raise InvalidInputError(
+            "language must be an ISO 639-1 code such as 'fr' or 'en', or None."
+        )
     language = language.strip().lower() if language else None
     layout = OutputLayout.create(output_dir)
 
@@ -119,7 +142,7 @@ def process_station(
         stages["resolve"].status, stages["resolve"].seconds = "ok", sw.seconds
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         fail("resolve", exc, sw)
-        skip_from(("capture", "transcribe", "analyse"))
+        skip_from(("capture", "transcribe", "translate", "analyse"))
         return _persist(result, layout, overwrite, secrets)
 
     # 2. capture (to local staging, then publish) ----------------------------
@@ -137,14 +160,15 @@ def process_station(
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         fail("capture", exc, sw)
         shutil.rmtree(stage_dir / result.run_id, ignore_errors=True)
-        skip_from(("transcribe", "analyse"))
+        skip_from(("transcribe", "translate", "analyse"))
         return _persist(result, layout, overwrite, secrets)
 
     # 3. transcribe ----------------------------------------------------------
     sw = Stopwatch()
     try:
         transcript = transcribe_audio(final, language=language, model=whisper_model,
-                                      device=device, initial_prompt=initial_prompt)
+                                      device=device, initial_prompt=initial_prompt,
+                                      on_language_mismatch=on_language_mismatch)
         tpath = layout.transcripts / f"{result.run_id}.json"
         write_json(tpath, transcript, overwrite=overwrite)
         write_text(tpath.with_suffix(".txt"), transcript.text + "\n", overwrite=overwrite)
@@ -152,20 +176,44 @@ def process_station(
         stages["transcribe"].status, stages["transcribe"].seconds = "ok", sw.seconds
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         fail("transcribe", exc, sw)
-        skip_from(("analyse",))
+        skip_from(("translate", "analyse"))
         return _persist(result, layout, overwrite, secrets)
     finally:
         if not keep_audio and result.audio_path:
             Path(result.audio_path).unlink(missing_ok=True)
             result.audio_path = None
 
-    # 4. analyse (optional) --------------------------------------------------
+    # 4. translate (optional: non-English broadcasts, LLM configured) ---------
+    skip_reason = (
+        "no LLM configured" if llm_cfg is None
+        else "translate=False" if not translate
+        else "broadcast is already in English" if transcript.language == "en"
+        else "no speech in transcript" if not transcript.text.strip()
+        else None
+    )
+    if skip_reason:
+        stages["translate"].status, stages["translate"].detail = "skipped", skip_reason
+    else:
+        sw = Stopwatch()
+        try:
+            translation = translate_transcript(transcript, config=llm_cfg)
+            en_path = layout.transcripts / f"{result.run_id}.en.txt"
+            write_text(en_path, translation.text_en + "\n", overwrite=overwrite)
+            result.translation, result.translation_path = translation, en_path
+            stages["translate"].status, stages["translate"].seconds = "ok", sw.seconds
+        except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
+            fail("translate", exc, sw)
+
+    # 5. analyse (optional) --------------------------------------------------
     if llm_cfg is None:
-        stages["analyse"].status = "skipped"
+        stages["analyse"].status, stages["analyse"].detail = "skipped", "no LLM configured"
     else:
         sw = Stopwatch()
         try:
             analysis = analyse_transcript(transcript, config=llm_cfg, station_name=st.name or None)
+            analysis = analysis.model_copy(
+                update={"transcript": bilingual_transcript(transcript, result.translation)}
+            )
             apath = layout.analysis / f"{result.run_id}.json"
             write_json(apath, analysis, overwrite=overwrite)
             result.analysis, result.analysis_path = analysis, apath
@@ -174,6 +222,29 @@ def process_station(
             fail("analyse", exc, sw)
 
     return _persist(result, layout, overwrite, secrets)
+
+
+def bilingual_transcript(transcript: Transcript, translation: Translation | None) -> BilingualTranscript:
+    """Original transcript with its English text, segment by segment.
+
+    English broadcasts reuse the original as ``text_en`` (``translated=False``); if a
+    translation is missing, ``text_en`` is ``None``.
+    """
+    if translation is not None:
+        return BilingualTranscript(language=transcript.language, translated=True, text=transcript.text,
+                                   text_en=translation.text_en, segments=translation.segments)
+    english = transcript.language == "en"
+    return BilingualTranscript(
+        language=transcript.language,
+        translated=False,
+        text=transcript.text,
+        text_en=transcript.text if english else None,
+        segments=[
+            TranslatedSegment(id=s.id, start=s.start, end=s.end, text=s.text,
+                              text_en=s.text if english else None)
+            for s in transcript.segments
+        ],
+    )
 
 
 def _persist(result: ProcessingResult, layout: OutputLayout, overwrite: bool,

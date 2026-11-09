@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from .exceptions import (
     AnalysisError,
@@ -55,7 +55,10 @@ segment."""
 
 
 def build_user_message(transcript: Transcript, station_name: str | None = None) -> str:
-    meta = [f"Broadcast language hint (ISO 639-1): {transcript.language or 'unknown'}"]
+    lang = transcript.language or "unknown"
+    if transcript.detected_language == transcript.language and transcript.detected_language_probability:
+        lang += f" (detected by Whisper, {transcript.detected_language_probability:.0%} confidence)"
+    meta = [f"Transcript language (ISO 639-1): {lang}"]
     if station_name:
         meta.append(f"Station: {station_name}")
     if transcript.duration_seconds:
@@ -356,7 +359,7 @@ def get_provider(config: LLMConfig, api_key: str) -> LLMProvider:
     return factory(config, api_key)
 
 
-# ----------------------------------------------------------------------- analyse
+# ------------------------------------------------- validated structured calls
 def _repair_instruction(error: str) -> str:
     return (
         "Your previous reply could not be used: " + error + "\n"
@@ -365,10 +368,95 @@ def _repair_instruction(error: str) -> str:
     )
 
 
-def _validate(text: str) -> NewsAnalysis:
-    return NewsAnalysis.model_validate(json.loads(text))
+def resolve_llm_config(
+    *,
+    api_key: str | None,
+    provider: str,
+    model: str | None,
+    base_url: str | None,
+    api_version: str | None,
+    config: LLMConfig | dict[str, Any] | None,
+) -> LLMConfig:
+    """Build an :class:`LLMConfig` from keyword arguments or an explicit ``config``."""
+    if config is None:
+        return coerce_llm_config({
+            "provider": provider, "model": model, "base_url": base_url, "api_version": api_version,
+            "api_key": SecretStr(api_key) if api_key else None,
+        })
+    cfg = coerce_llm_config(config)
+    if api_key:
+        cfg = cfg.model_copy(update={"api_key": SecretStr(api_key)})
+    return cfg
 
 
+@dataclass
+class ValidatedCall:
+    parsed: Any
+    input_tokens: int | None
+    output_tokens: int | None
+    request_ids: list[str]
+    repaired: bool
+
+
+def complete_validated(
+    llm_provider: LLMProvider,
+    *,
+    system: str,
+    user_message: str,
+    output_model: type[BaseModel],
+    config: LLMConfig,
+    secrets: list[str | None],
+    task: str,
+    check: Callable[[Any], None] | None = None,
+) -> ValidatedCall:
+    """One structured LLM call validated against ``output_model``, with one repair retry.
+
+    ``check`` may raise ``ValueError`` for problems the schema cannot express; that
+    also triggers the repair turn. ``task`` names the job in error messages.
+    """
+    schema = output_model.model_json_schema()  # each provider adapts it to its own rules
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+    in_tok = out_tok = 0
+    request_ids: list[str] = []
+    last_error = ""
+    for attempt in range(2):  # first try + one repair retry
+        try:
+            resp = llm_provider.complete_json(system=system, messages=messages, schema=schema, config=config)
+        except (AnalysisError, ConfigurationError):
+            raise
+        except Exception as exc:  # provider bugs/unknown errors -> AnalysisError, key-safe
+            raise AnalysisError(redact(f"{type(exc).__name__}: {exc}", secrets)) from exc
+        in_tok += resp.input_tokens or 0
+        out_tok += resp.output_tokens or 0
+        if resp.request_id:
+            request_ids.append(resp.request_id)
+        if resp.stop_reason == "refusal":
+            raise AnalysisRefusedError(f"The model declined to {task} ({resp.refusal_detail}).")
+        if resp.stop_reason == "max_tokens":
+            raise AnalysisError(f"Response truncated at max_tokens={config.max_tokens}; raise LLMConfig.max_tokens.")
+        try:
+            parsed = output_model.model_validate(json.loads(resp.text))
+            if check is not None:
+                check(parsed)
+        except json.JSONDecodeError as exc:
+            last_error = f"invalid JSON ({exc.msg})"
+        except ValidationError as exc:
+            last_error = f"schema validation failed: {exc.errors(include_input=False, include_url=False)}"
+        except ValueError as exc:
+            last_error = str(exc)
+        else:
+            return ValidatedCall(parsed, in_tok or None, out_tok or None, request_ids, attempt > 0)
+        log.warning("Attempt %d to %s returned invalid output: %s", attempt + 1, task, last_error)
+        # Append-only repair turn: keep the model's own reply, then ask for a fix.
+        messages = [
+            *messages,
+            {"role": "assistant", "content": resp.raw_content or resp.text or "(empty)"},
+            {"role": "user", "content": _repair_instruction(last_error)},
+        ]
+    raise AnalysisError(f"LLM output was still invalid after one repair attempt: {last_error}")
+
+
+# ----------------------------------------------------------------------- analyse
 def analyse_transcript(
     transcript: Transcript,
     api_key: str | None = None,
@@ -389,15 +477,8 @@ def analyse_transcript(
     Pass ``config`` for full control, or ``llm_provider`` to inject a custom client.
     The transcript itself is never modified.
     """
-    if config is None:
-        cfg = coerce_llm_config({
-            "provider": provider, "model": model, "base_url": base_url, "api_version": api_version,
-            "api_key": SecretStr(api_key) if api_key else None,
-        })
-    else:
-        cfg = coerce_llm_config(config)
-        if api_key:
-            cfg = cfg.model_copy(update={"api_key": SecretStr(api_key)})
+    cfg = resolve_llm_config(api_key=api_key, provider=provider, model=model, base_url=base_url,
+                             api_version=api_version, config=config)
     if not transcript.text.strip():
         return AnalysisResult(
             analysis=NewsAnalysis(
@@ -415,56 +496,24 @@ def analyse_transcript(
     if llm_provider is None:
         key = resolve_api_key(cfg)
         llm_provider = get_provider(cfg, key)
-    # Plain JSON schema; each provider adapts it to its own structured-output rules.
-    schema = NewsAnalysis.model_json_schema()
 
     sw = Stopwatch()
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": build_user_message(transcript, station_name)}
-    ]
-    in_tok = out_tok = 0
-    request_ids: list[str] = []
-    last_error = ""
-    for attempt in range(2):  # first try + one repair retry
-        try:
-            resp = llm_provider.complete_json(
-                system=SYSTEM_PROMPT, messages=messages, schema=schema, config=cfg
-            )
-        except (AnalysisError, ConfigurationError):
-            raise
-        except Exception as exc:  # provider bugs/unknown errors -> AnalysisError, key-safe
-            raise AnalysisError(redact(f"{type(exc).__name__}: {exc}", [key])) from exc
-        in_tok += resp.input_tokens or 0
-        out_tok += resp.output_tokens or 0
-        if resp.request_id:
-            request_ids.append(resp.request_id)
-        if resp.stop_reason == "refusal":
-            raise AnalysisRefusedError(f"The model declined to analyse this transcript ({resp.refusal_detail}).")
-        if resp.stop_reason == "max_tokens":
-            raise AnalysisError(f"Response truncated at max_tokens={cfg.max_tokens}; raise LLMConfig.max_tokens.")
-        try:
-            analysis = _validate(resp.text)
-        except (json.JSONDecodeError, ValidationError) as exc:
-            last_error = (
-                f"invalid JSON ({exc.msg})" if isinstance(exc, json.JSONDecodeError)
-                else f"schema validation failed: {exc.errors(include_input=False, include_url=False)}"
-            )
-            log.warning("Analysis attempt %d returned invalid output: %s", attempt + 1, last_error)
-            # Append-only repair turn: keep the model's own reply, then ask for a fix.
-            messages = [
-                *messages,
-                {"role": "assistant", "content": resp.raw_content or resp.text or "(empty)"},
-                {"role": "user", "content": _repair_instruction(last_error)},
-            ]
-            continue
-        return AnalysisResult(
-            analysis=analysis,
-            provider=cfg.provider,
-            model=cfg.model or "",
-            input_tokens=in_tok or None,
-            output_tokens=out_tok or None,
-            repaired=attempt > 0,
-            request_ids=request_ids,
-            processing_seconds=sw.seconds,
-        )
-    raise AnalysisError(f"LLM output was still invalid after one repair attempt: {last_error}")
+    call = complete_validated(
+        llm_provider,
+        system=SYSTEM_PROMPT,
+        user_message=build_user_message(transcript, station_name),
+        output_model=NewsAnalysis,
+        config=cfg,
+        secrets=[key],
+        task="analyse this transcript",
+    )
+    return AnalysisResult(
+        analysis=call.parsed,
+        provider=cfg.provider,
+        model=cfg.model or "",
+        input_tokens=call.input_tokens,
+        output_tokens=call.output_tokens,
+        repaired=call.repaired,
+        request_ids=call.request_ids,
+        processing_seconds=sw.seconds,
+    )

@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
+### Added
+- English translation of non-English broadcasts, segment by segment with
+  timestamps (`translate_transcript`, and a `translate` stage in
+  `process_station`). The original transcript is kept; the English text is
+  saved as `transcripts/<run>.en.txt`, and the analysis file and manifest carry
+  both side by side (`analysis.transcript`: `text`, `text_en`, `segments`).
+  On by default when an LLM is configured; `translate=False` turns it off.
+  English broadcasts make no translation call.
+- `Translation`, `TranslatedSegment` and `BilingualTranscript` models;
+  `StageResult.detail` explains why a stage was skipped.
+- `on_language_mismatch` on `transcribe_audio` / `process_station`:
+  `"use_detected"` (default), `"use_hint"` or `"error"`
+  (raises `LanguageMismatchError`).
+- `Transcript.language_hint`, `detected_language`,
+  `detected_language_probability` and `language_mismatch`.
+
+### Changed
+- `language=None` now uses multi-window language detection rather than
+  Whisper's first-30-seconds guess.
+- The LLM prompt states the transcript language and detection confidence.
+
+### Fixed
+- A wrong `language` hint no longer turns the transcript into a translation.
+  Whisper treats its language setting as an instruction, so German audio
+  transcribed with `language="en"` came out in English. The hint is now checked
+  with Whisper's language detection over up to five 30 s windows. When detection
+  is confident (>= 50 %) and the hint gets < 10 %, the detected language is used
+  and a warning is logged.
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

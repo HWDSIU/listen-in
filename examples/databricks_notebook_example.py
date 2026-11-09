@@ -16,7 +16,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "listen-in[whisper,llm-openai,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
+# MAGIC %pip install "listen-in[whisper,llm-openai,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0"
 
 # COMMAND ----------
 
@@ -29,7 +29,7 @@ ENGLISH_STATION = "https://www.radio-browser.info/history/598c4d0e-6b06-43fb-bff
 
 # Job parameters / widgets: one station per task so stations schedule independently.
 dbutils.widgets.text("station", FRENCH_STATION, "Station (URL, UUID or history URL)")  # noqa: F821
-dbutils.widgets.text("language", "fr", "Language hint (ISO 639-1, e.g. fr, en)")  # noqa: F821
+dbutils.widgets.text("language", "fr", "Language hint (ISO 639-1; blank = detect)")  # noqa: F821
 dbutils.widgets.text("duration_seconds", "600", "Seconds to record")  # noqa: F821
 dbutils.widgets.text("output_dir", "/Volumes/main/radio/listen_in/outputs", "Output Volume path")  # noqa: F821
 # Whisper model: "small" for English, French and most languages; "turbo" for less widely
@@ -42,7 +42,7 @@ dbutils.widgets.text("llm_endpoint", "", "Azure endpoint (https://<resource>.ope
 dbutils.widgets.text("llm_api_version", "2024-12-01-preview", "Azure API version")  # noqa: F821
 
 station = dbutils.widgets.get("station")  # noqa: F821
-language = dbutils.widgets.get("language")  # noqa: F821
+language = dbutils.widgets.get("language").strip() or None  # noqa: F821  (checked against the audio)
 duration_seconds = int(dbutils.widgets.get("duration_seconds"))  # noqa: F821
 output_dir = dbutils.widgets.get("output_dir")  # noqa: F821
 whisper_model = dbutils.widgets.get("whisper_model")  # noqa: F821

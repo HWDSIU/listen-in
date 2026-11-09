@@ -85,6 +85,13 @@ class TranscriptionError(ListenInError):
     """Whisper failed to load or to transcribe the audio."""
 
 
+class LanguageMismatchError(TranscriptionError):
+    """The language hint clearly disagrees with the language spoken in the audio.
+
+    Raised only with ``on_language_mismatch="error"``.
+    """
+
+
 # --------------------------------------------------------------------- analysis
 class AnalysisError(ListenInError):
     """The LLM call failed or returned output that could not be validated."""

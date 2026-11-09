@@ -16,6 +16,7 @@ from .api import (
     process_station,
     resolve_station,
     transcribe_audio,
+    translate_transcript,
 )
 from .exceptions import (
     AnalysisError,
@@ -24,6 +25,7 @@ from .exceptions import (
     ConfigurationError,
     FFmpegNotFoundError,
     InvalidInputError,
+    LanguageMismatchError,
     ListenInError,
     OptionalDependencyError,
     OutputExistsError,
@@ -36,6 +38,7 @@ from .exceptions import (
 from .models import (
     AnalysisResult,
     AudioCapture,
+    BilingualTranscript,
     CaptureOptions,
     LLMConfig,
     NewsAnalysis,
@@ -45,6 +48,8 @@ from .models import (
     Station,
     Transcript,
     TranscriptSegment,
+    TranslatedSegment,
+    Translation,
 )
 
 analyze_transcript = analyse_transcript  # US-spelling alias
@@ -56,6 +61,7 @@ __all__ = [
     "AnalysisRefusedError",
     "AnalysisResult",
     "AudioCapture",
+    "BilingualTranscript",
     "CaptureError",
     "CaptureOptions",
     "ConfigurationError",
@@ -63,6 +69,7 @@ __all__ = [
     "InvalidInputError",
     "LLMConfig",
     "LLMProvider",
+    "LanguageMismatchError",
     "ListenInError",
     "NewsAnalysis",
     "NewsStory",
@@ -78,6 +85,8 @@ __all__ = [
     "Transcript",
     "TranscriptSegment",
     "TranscriptionError",
+    "TranslatedSegment",
+    "Translation",
     "__version__",
     "analyse_transcript",
     "analyze_transcript",
@@ -88,4 +97,5 @@ __all__ = [
     "register_provider",
     "resolve_station",
     "transcribe_audio",
+    "translate_transcript",
 ]
