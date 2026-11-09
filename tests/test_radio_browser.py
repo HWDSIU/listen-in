@@ -181,3 +181,38 @@ def test_discovery_falls_back_to_static_list(monkeypatch):
     monkeypatch.setattr(radio_browser, "_dns_servers", lambda: [])
     client = make_client(lambda r: httpx.Response(500))
     assert set(radio_browser.discover_servers(client)) == set(radio_browser.FALLBACK_SERVERS)
+
+
+# ------------------------------------------------------------- extra metadata
+def test_captures_subdivision_geo_tags_and_language_codes():
+    rec = station_record(
+        state="Berlin", iso_3166_2="DE-BE", geo_lat=52.4802578, geo_long=13.3347639,
+        languagecodes="DE", tags="culture,news,public service,information",
+        favicon="https://example.org/icon.png",
+    )
+    st = resolve_station(FRENCH_UUID, client=make_client(lambda r: httpx.Response(200, json=[rec])), servers=["s1"])
+    assert (st.subdivision, st.subdivision_code) == ("Berlin", "DE-BE")
+    assert (st.latitude, st.longitude) == (52.4802578, 13.3347639)
+    assert st.language_codes == ["de"]
+    assert st.tags == ["culture", "news", "public service", "information"]
+    assert st.favicon == "https://example.org/icon.png"
+    dumped = st.model_dump(mode="json")  # flows into manifests unchanged
+    assert dumped["subdivision_code"] == "DE-BE" and dumped["latitude"] == 52.4802578
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, (None, None, None, None, [], [])),  # fields absent
+        ({"state": "", "iso_3166_2": " ", "geo_lat": None, "geo_long": None, "tags": "", "languagecodes": ""},
+         (None, None, None, None, [], [])),
+        ({"geo_lat": "51.5", "geo_long": "-0.12"}, (None, None, 51.5, -0.12, [], [])),  # numeric strings
+        ({"geo_lat": 200, "geo_long": "east"}, (None, None, None, None, [], [])),  # out of range / junk
+        ({"tags": " news , news,talk ,", "languagecodes": "DE, en ,de"},
+         (None, None, None, None, ["news", "talk"], ["de", "en"])),
+    ],
+)
+def test_extra_metadata_is_optional_and_cleaned(overrides, expected):
+    rec = station_record(**overrides)
+    st = resolve_station(FRENCH_UUID, client=make_client(lambda r: httpx.Response(200, json=[rec])), servers=["s1"])
+    assert (st.subdivision, st.subdivision_code, st.latitude, st.longitude, st.tags, st.language_codes) == expected

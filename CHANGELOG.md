@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-09
+
+### Added
+- More Radio Browser metadata on `Station`, and so in every manifest:
+  `subdivision` and `subdivision_code` (e.g. `Berlin` / `DE-BE`), `latitude`
+  and `longitude`, `language_codes`, `tags` and `favicon`. Missing,
+  blank or out-of-range values are left empty.
+- Project logo (`assets/listen-in-icon.svg`) at the top of the README.
+- README and package description now lead with the structured analysis (stories,
+  people, organisations, places, key claims, uncertainties), not just summaries.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

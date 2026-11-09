@@ -198,6 +198,29 @@ def _lookup_uuid(
             c.close()
 
 
+def _text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _split_list(value: object, *, lower: bool = False) -> list[str]:
+    """Comma-separated Radio Browser field -> de-duplicated, trimmed list."""
+    items = [x.strip() for x in str(value or "").split(",")]
+    items = [x.lower() if lower else x for x in items if x]
+    return list(dict.fromkeys(items))
+
+
+def _coordinate(value: object, limit: float) -> float | None:
+    """Parse a latitude/longitude; None when missing, non-numeric or out of range."""
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if -limit <= number <= limit else None
+
+
 def _station_from_record(rec: dict, host: str) -> Station:
     raw = (rec.get("url_resolved") or "").strip() or (rec.get("url") or "").strip()
     if not raw:
@@ -219,7 +242,14 @@ def _station_from_record(rec: dict, host: str) -> Station:
         homepage=rec.get("homepage") or None,
         country=rec.get("country") or None,
         countrycode=rec.get("countrycode") or None,
+        subdivision=_text(rec.get("state")),
+        subdivision_code=_text(rec.get("iso_3166_2")),
+        latitude=_coordinate(rec.get("geo_lat"), 90),
+        longitude=_coordinate(rec.get("geo_long"), 180),
         language=rec.get("language") or None,
+        language_codes=_split_list(rec.get("languagecodes"), lower=True),
+        tags=_split_list(rec.get("tags")),
+        favicon=_text(rec.get("favicon")),
         codec=rec.get("codec") or None,
         bitrate=int(bitrate) if isinstance(bitrate, (int, float)) and bitrate else None,
         lastcheckok=bool(rec["lastcheckok"]) if "lastcheckok" in rec else None,

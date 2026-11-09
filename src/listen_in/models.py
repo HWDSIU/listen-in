@@ -30,7 +30,20 @@ class Station(_Model):
     homepage: str | None = None
     country: str | None = None
     countrycode: str | None = None
+    subdivision: str | None = Field(
+        default=None, description="State/region/province (Radio Browser 'state'), e.g. 'Berlin'."
+    )
+    subdivision_code: str | None = Field(
+        default=None, description="ISO 3166-2 subdivision code (Radio Browser 'iso_3166_2'), e.g. 'DE-BE'."
+    )
+    latitude: float | None = Field(default=None, description="Station latitude (Radio Browser 'geo_lat').")
+    longitude: float | None = Field(default=None, description="Station longitude (Radio Browser 'geo_long').")
     language: str | None = Field(default=None, description="Radio Browser language tag(s).")
+    language_codes: list[str] = Field(
+        default_factory=list, description="Language codes listed by Radio Browser ('languagecodes'), lower-case."
+    )
+    tags: list[str] = Field(default_factory=list, description="Radio Browser tags, e.g. ['news', 'culture'].")
+    favicon: str | None = Field(default=None, description="Station logo URL listed by Radio Browser.")
     codec: str | None = None
     bitrate: int | None = None
     lastcheckok: bool | None = None

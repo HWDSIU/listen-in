@@ -1,9 +1,17 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/HWDSIU/listen-in/main/assets/listen-in-icon.svg" width="112" height="112" alt="listen-in logo: a broadcast symbol inside a speech bubble">
+</p>
+
 # listen-in
 
-Record a short segment from an internet radio station, transcribe it **locally**
-with [OpenAI Whisper](https://github.com/openai/whisper), and optionally have an LLM
-(Claude, OpenAI, or a model deployed on Azure OpenAI / Azure AI Foundry) produce a
-structured **English** news summary, whatever the broadcast language.
+Record internet radio, transcribe it **locally** with
+[OpenAI Whisper](https://github.com/openai/whisper), and turn each broadcast into
+**structured English news analysis**, whatever language it's in. An LLM (Claude,
+OpenAI, or a model deployed on Azure OpenAI / Azure AI Foundry) splits the bulletin
+into separate stories. For each story it extracts the **people, organisations and
+places** named, the **key claims** made, and anything **uncertain**, such as names
+that may have been misheard. Non-English broadcasts also get a timestamped English
+translation alongside the original-language transcript.
 
 ```python
 from listen_in import process_station
@@ -19,7 +27,7 @@ print(result.statuses)
 print(result.analysis.analysis.summary_en)
 ```
 
-> **Status:** alpha (0.3.0). The API may change before 1.0.
+> **Status:** alpha (0.3.1). The API may change before 1.0.
 
 [![tests](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml/badge.svg)](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml)
 
@@ -27,6 +35,8 @@ print(result.analysis.analysis.summary_en)
 
 - Resolves a station from a **direct stream URL**, a **[Radio Browser](https://www.radio-browser.info) UUID**,
   or a **Radio Browser history URL**, using the Radio Browser API with automatic server failover.
+  Station metadata is kept with every run when Radio Browser has it: country, subdivision (e.g.
+  `Berlin` / `DE-BE`), latitude and longitude, language codes, tags, homepage and logo.
 - Records the stream with `ffmpeg` to mono 16 kHz WAV (atomic writes, timeouts, no shell).
 - Transcribes with Whisper on CPU or CUDA. It keeps the **original-language** text and
   timestamped segments and never uses Whisper's translate mode.
@@ -64,7 +74,7 @@ Python 3.10 or later.
 listen-in is **not yet published on PyPI**, so install a tagged release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.1"
 ```
 
 Swap `llm-anthropic` for `llm-openai` to use OpenAI or Azure OpenAI / AI Foundry (or
@@ -94,7 +104,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.1` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then `$LISTEN_IN_FFMPEG`,
 then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -342,7 +352,7 @@ apt-get install -y ffmpeg
 Then in the notebook:
 
 ```python
-%pip install "listen-in[whisper,llm-openai] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.0"
+%pip install "listen-in[whisper,llm-openai] @ git+https://github.com/HWDSIU/listen-in.git@v0.3.1"
 dbutils.library.restartPython()
 ```
 

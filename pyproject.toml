@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "listen-in"
 dynamic = ["version"]
-description = "Record internet radio, transcribe it locally with Whisper, and summarise the news in English with an LLM (Claude, OpenAI or Azure OpenAI)."
+description = "Record internet radio, transcribe it locally with Whisper, and extract structured English news analysis (stories, people, organisations, places, claims) with an LLM."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
