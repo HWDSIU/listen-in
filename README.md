@@ -100,10 +100,36 @@ from listen_in import CaptureOptions
 opts = CaptureOptions(ffmpeg_path="/usr/bin/ffmpeg")
 ```
 
+### Choosing a Whisper model
+
+The Whisper model is a parameter: `whisper_model=` on `process_station`, `model=` on
+`transcribe_audio`, `--model` in the example script, and the `whisper_model` widget in the
+Databricks notebook. The default is `small`.
+
+| Model | Download | Use it for |
+|---|---|---|
+| `small` (default) | ~460 MB | English, French and most widely spoken languages. Accurate enough for news monitoring and runs faster than real time on a laptop CPU. |
+| `turbo` (large-v3-turbo) | ~1.6 GB | Less widely spoken languages such as **Swahili**, where `small` misspells names, institutions and figures. Needs a GPU or a machine with 16 GB+ RAM; on an 8 GB laptop CPU it runs at roughly half real-time speed. |
+| `medium`, `large-v3` | ~1.5 GB / ~2.9 GB | Alternatives when `turbo` is not good enough; slower. |
+| `base`, `tiny` | ~140 MB / ~75 MB | Quick tests only. |
+
+In a test on a 5-minute Swahili news bulletin, `turbo` transcribed officials' names,
+institutions and figures (percentages, sums of money) correctly. `small` produced phonetic
+approximations of the same passages and dropped the last 40 seconds. Haiku's summary
+went from vague ("water company (name unclear)") to specific. For English and French
+news, `small` was already clean.
+
+```python
+# Most languages
+process_station(station, language="en", whisper_model="small", ...)
+# Less widely spoken languages, ideally on GPU
+process_station(station, language="sw", whisper_model="turbo", ...)
+```
+
 ### First run downloads Whisper weights
 
 The first transcription downloads the model to `~/.cache/whisper`: about 460 MB for
-`small` and 1.5 GB for `medium`. Allow time and disk space, and outbound HTTPS access to
+`small` and 1.6 GB for `turbo`. Allow time and disk space, and outbound HTTPS access to
 `openaipublic.azureedge.net`. Pass `download_root=` to `transcribe_audio` to use a different cache.
 
 ## Usage

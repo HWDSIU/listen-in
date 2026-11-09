@@ -18,4 +18,9 @@ All notable changes to this project are documented here. The format follows
   (default `claude-haiku-5-5`) with Pydantic validation and one repair retry.
 - `process_station`: end-to-end run with per-stage status/timings and JSON manifests,
   local or Databricks Volume output.
-- Examples for a local two-station test and a Databricks notebook task.
+- Examples for a local two-station test (English + French) and a Databricks notebook task.
+- README guidance on choosing a Whisper model: `small` by default, `turbo` for less
+  widely spoken languages such as Swahili.
+
+### Fixed
+- The `persist` stage now records how long the manifest write actually took.

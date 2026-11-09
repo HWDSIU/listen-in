@@ -32,7 +32,9 @@ dbutils.widgets.text("station", FRENCH_STATION, "Station (URL, UUID or history U
 dbutils.widgets.text("language", "fr", "Language hint (ISO 639-1, e.g. fr, en)")  # noqa: F821
 dbutils.widgets.text("duration_seconds", "600", "Seconds to record")  # noqa: F821
 dbutils.widgets.text("output_dir", "/Volumes/main/radio/listen_in/outputs", "Output Volume path")  # noqa: F821
-dbutils.widgets.text("whisper_model", "small", "Whisper model")  # noqa: F821
+# Whisper model: "small" for English, French and most languages; "turbo" for less widely
+# spoken languages such as Swahili (use a GPU cluster or a driver with 16 GB+ RAM).
+dbutils.widgets.text("whisper_model", "small", "Whisper model (small | turbo)")  # noqa: F821
 dbutils.widgets.text("llm_model", "claude-haiku-5-5", "LLM model (blank = transcription only)")  # noqa: F821
 
 station = dbutils.widgets.get("station")  # noqa: F821

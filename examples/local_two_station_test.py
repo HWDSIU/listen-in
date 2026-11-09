@@ -41,7 +41,9 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="listen-in two-station test")
     ap.add_argument("--duration", type=int, default=60, help="seconds to record per station")
-    ap.add_argument("--model", default="small", help="Whisper model name")
+    ap.add_argument("--model", default="small",
+                    help="Whisper model: small (default; fine for English/French) or turbo "
+                         "(recommended for less widely spoken languages such as Swahili)")
     ap.add_argument("--output-dir", default="./test-output")
     ap.add_argument("--device", default="auto", help="auto, cpu or cuda")
     ap.add_argument("--no-llm", action="store_true", help="skip the LLM step even if configured")

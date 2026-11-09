@@ -65,6 +65,9 @@ def process_station(
     artefact produced before the failure is kept. A JSON manifest is always written
     to ``<output_dir>/manifests/``. Invalid arguments raise immediately, before any
     recording starts. Pass ``llm=None`` for transcription only.
+
+    ``whisper_model`` defaults to ``"small"``; use ``"turbo"`` for less widely spoken
+    languages such as Swahili (see the README's "Choosing a Whisper model").
     """
     options = capture_options or CaptureOptions()
     duration = validate_duration(duration_seconds, options.max_duration_seconds)
@@ -181,8 +184,10 @@ def _persist(result: ProcessingResult, layout: OutputLayout, overwrite: bool,
     result.manifest_path = mpath
     result.stages["persist"].status = "ok"
     try:
-        result.stages["persist"].seconds = sw.seconds
         write_json(mpath, result, overwrite=overwrite)
+        # Record the measured write time, then refresh the (small) manifest with it.
+        result.stages["persist"].seconds = sw.seconds
+        write_json(mpath, result, overwrite=True)
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         result.stages["persist"].status = "failed"
         result.stages["persist"].error = describe_error(exc, secrets)

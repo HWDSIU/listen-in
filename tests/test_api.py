@@ -164,6 +164,14 @@ def test_invalid_arguments_fail_fast(tmp_path, pipeline):
     assert pipeline["calls"] == []
 
 
+def test_persist_time_recorded_in_manifest(tmp_path, pipeline):
+    r = run(tmp_path)
+    assert r.stages["persist"].seconds is not None
+    manifest = json.loads(r.manifest_path.read_text())
+    assert manifest["stages"]["persist"]["seconds"] == r.stages["persist"].seconds
+    assert manifest["stages"]["persist"]["status"] == "ok"
+
+
 def test_language_hint_passed_to_whisper(tmp_path, pipeline):
     run(tmp_path)
     assert ("transcribe", "fr", "small") in pipeline["calls"]

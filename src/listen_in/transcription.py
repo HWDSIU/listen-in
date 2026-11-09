@@ -124,8 +124,11 @@ def transcribe_audio(
     """Transcribe an audio file in its original language (never translates).
 
     ``language`` is an ISO 639-1 hint such as ``"fr"`` or ``"en"``; ``None`` lets
-    Whisper detect it. ``condition_on_previous_text`` defaults to False because radio
-    audio mixes music and speech and conditioning makes repetition loops likelier.
+    Whisper detect it. ``model`` is any openai-whisper model name: ``"small"`` (default)
+    suits English, French and most widely spoken languages; ``"turbo"`` is recommended
+    for less widely spoken languages such as Swahili (best on GPU or 16 GB+ RAM).
+    ``condition_on_previous_text`` defaults to False because radio audio mixes music
+    and speech and conditioning makes repetition loops likelier.
     """
     path = Path(audio.path if isinstance(audio, AudioCapture) else audio)
     if not path.is_file():
