@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install -e ".[llm-anthropic,dev]"
+      - run: pip install -e ".[llm-anthropic,llm-openai,dev]"
       - run: ruff check src tests examples
       - run: mypy src
 
@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # Whisper is faked in the tests; numpy is enough. No live radio, weights or paid APIs.
-      - run: pip install -e ".[llm-anthropic,dev]" numpy certifi
+      - run: pip install -e ".[llm-anthropic,llm-openai,dev]" numpy certifi
       - run: pytest --cov=listen_in --cov-report=term-missing
 
   test-base-install:
@@ -57,7 +57,7 @@ jobs:
         run: |
           python - <<'EOF'
           import sys, listen_in
-          for mod in ("whisper", "torch", "anthropic", "numpy"):
+          for mod in ("whisper", "torch", "anthropic", "openai", "numpy"):
               assert mod not in sys.modules, mod
           print("listen_in", listen_in.__version__, "imports cleanly")
           EOF

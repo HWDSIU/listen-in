@@ -193,6 +193,6 @@ def test_existing_outputs_not_overwritten(tmp_path, pipeline):
 
 def test_base_import_does_not_load_optional_dependencies():
     code = ("import sys, listen_in; "
-            "print(sorted(m for m in ('whisper','torch','anthropic') if m in sys.modules))")
+            "print(sorted(m for m in ('whisper','torch','anthropic','openai') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"

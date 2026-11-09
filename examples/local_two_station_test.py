@@ -59,7 +59,8 @@ def main() -> int:
         llm = {
             "provider": os.environ.get("LLM_PROVIDER", "anthropic"),
             "model": os.environ["LLM_MODEL"],
-            "base_url": os.environ.get("LLM_BASE_URL") or None,
+            "base_url": os.environ.get("LLM_BASE_URL") or None,  # Azure: resource endpoint
+            "api_version": os.environ.get("LLM_API_VERSION") or None,  # Azure only
             # api_key is read from $LLM_API_KEY by the package; never printed.
         }
     print(f"LLM analysis: {'on (' + llm['model'] + ')' if llm else 'off (set LLM_API_KEY and LLM_MODEL)'}")

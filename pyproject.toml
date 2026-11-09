@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "listen-in"
 dynamic = ["version"]
-description = "Record internet radio, transcribe it locally with Whisper, and summarise the news in English with an LLM."
+description = "Record internet radio, transcribe it locally with Whisper, and summarise the news in English with an LLM (Claude, OpenAI or Azure OpenAI)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "HWDSIU" }]
-keywords = ["radio", "whisper", "transcription", "news", "monitoring", "databricks"]
+keywords = ["radio", "whisper", "transcription", "news", "monitoring", "databricks", "azure-openai"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -42,6 +42,10 @@ whisper = [
 llm-anthropic = [
   "anthropic>=2.6",
 ]
+# OpenAI API, OpenAI-compatible servers, and Azure OpenAI / Azure AI Foundry
+llm-openai = [
+  "openai>=1.66",
+]
 # Bundles a static ffmpeg binary via pip. Useful where OS packages cannot be
 # installed (locked-down laptops, Databricks serverless). A system ffmpeg is
 # still preferred when available.
@@ -49,7 +53,7 @@ ffmpeg = [
   "imageio-ffmpeg>=0.5",
 ]
 all = [
-  "listen-in[whisper,llm-anthropic,ffmpeg]",
+  "listen-in[whisper,llm-anthropic,llm-openai,ffmpeg]",
 ]
 dev = [
   "build",

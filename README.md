@@ -2,8 +2,8 @@
 
 Record a short segment from an internet radio station, transcribe it **locally**
 with [OpenAI Whisper](https://github.com/openai/whisper), and optionally have an LLM
-(Claude, by default `claude-haiku-5-5`) produce a structured **English** news summary,
-whatever the broadcast language.
+(Claude, OpenAI, or a model deployed on Azure OpenAI / Azure AI Foundry) produce a
+structured **English** news summary, whatever the broadcast language.
 
 ```python
 from listen_in import process_station
@@ -19,7 +19,7 @@ print(result.statuses)
 print(result.analysis.analysis.summary_en)
 ```
 
-> **Status:** alpha (0.1.0). The API may change before 1.0.
+> **Status:** alpha (0.2.0). The API may change before 1.0.
 
 [![tests](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml/badge.svg)](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml)
 
@@ -62,10 +62,11 @@ Python 3.10 or later.
 listen-in is **not yet published on PyPI**, so install a tagged release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
 ```
 
-Pin to a release tag (see [tags](https://github.com/HWDSIU/listen-in/tags)) for
+Swap `llm-anthropic` for `llm-openai` to use OpenAI or Azure OpenAI / AI Foundry (or
+include both). Pin to a release tag (see [tags](https://github.com/HWDSIU/listen-in/tags)) for
 reproducible installs, or use `@main` for the latest unreleased code. Once the package
 is on PyPI this will become `pip install "listen-in[whisper,llm-anthropic]"`.
 
@@ -73,7 +74,8 @@ is on PyPI this will become `pip install "listen-in[whisper,llm-anthropic]"`.
 |---|---|---|
 | *(none)* | `httpx`, `pydantic`, `platformdirs` | station resolution, models |
 | `whisper` | `openai-whisper` (+ PyTorch), `numpy`, `certifi` | `transcribe_audio` |
-| `llm-anthropic` | `anthropic` | `analyse_transcript` with Claude |
+| `llm-anthropic` | `anthropic` | analysis with Claude (`provider="anthropic"`) |
+| `llm-openai` | `openai` | analysis with OpenAI or Azure OpenAI / AI Foundry (`provider="openai"` / `"azure_openai"`) |
 | `ffmpeg` | `imageio-ffmpeg` (static ffmpeg binary) | recording where you cannot install ffmpeg |
 | `all` | all of the above | |
 
@@ -90,7 +92,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then `$LISTEN_IN_FFMPEG`,
 then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -205,8 +207,47 @@ Analysis schema:
 
 #### LLM providers
 
-The first version ships the `anthropic` provider. It uses Claude structured outputs
-so responses follow the schema, then validates them with Pydantic and allows one
+| `provider` | Extra | `model` | Other settings | Key from (if `api_key` not passed) |
+|---|---|---|---|---|
+| `anthropic` (default) | `llm-anthropic` | defaults to `claude-haiku-5-5` | — | `$LLM_API_KEY`, `$ANTHROPIC_API_KEY` |
+| `openai` | `llm-openai` | required, e.g. `gpt-6.1` | `base_url` for any OpenAI-compatible server | `$LLM_API_KEY`, `$OPENAI_API_KEY` |
+| `azure_openai` | `llm-openai` | required: your **deployment name** | `base_url` = resource endpoint (or `$AZURE_OPENAI_ENDPOINT`); `api_version` (default `2024-12-01-preview`) | `$LLM_API_KEY`, `$AZURE_OPENAI_API_KEY` |
+
+Common settings: `effort` (reasoning effort, sent only when set; leave it unset for
+models without reasoning controls), `max_tokens`, `timeout_seconds`, `max_retries`.
+`openai_compatible` is accepted as an alias of `openai`, and `azure` / `azure_foundry`
+of `azure_openai`.
+
+Azure OpenAI / Azure AI Foundry, with the key held in Azure Key Vault:
+
+```python
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+
+api_key = SecretClient(vault_url="https://<vault>.vault.azure.net",
+                       credential=DefaultAzureCredential()).get_secret("<secret-name>").value
+
+result = process_station(
+    station="598c4d0e-6b06-43fb-bff4-717c591213a9",   # BBC World Service
+    language="en",
+    duration_seconds=300,
+    output_dir="./output",
+    llm={
+        "provider": "azure_openai",
+        "model": "<deployment-name>",                  # your Azure deployment name
+        "base_url": "https://<resource>.openai.azure.com",
+        "api_version": "2024-12-01-preview",
+        "api_key": api_key,
+    },
+)
+```
+
+OpenAI API: `llm={"provider": "openai", "model": "gpt-6.1"}` with `$OPENAI_API_KEY` set.
+
+How it works: the `anthropic` provider uses Claude structured outputs. The `openai`
+and `azure_openai` providers use Chat Completions with a strict JSON-schema
+`response_format`; set `structured_output="json_object"` for a deployment that does
+not support JSON schemas. Every response is validated with Pydantic and gets one
 repair retry. Other back ends implement the small `LLMProvider` protocol and are
 registered with `listen_in.register_provider(name, factory)`. API keys are held as
 `SecretStr` and never appear in logs, files, manifests or returned models.
@@ -254,7 +295,7 @@ apt-get install -y ffmpeg
 Then in the notebook:
 
 ```python
-%pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
+%pip install "listen-in[whisper,llm-openai] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
 dbutils.library.restartPython()
 ```
 
@@ -267,8 +308,11 @@ tested on serverless yet. Classic compute with the init script is the supported
 MVP path. GPU compute (CUDA) makes Whisper much faster, and FP16 is used
 automatically on CUDA.
 
+Use `llm-anthropic` instead of (or as well as) `llm-openai` for Claude.
+
 The cluster needs outbound HTTPS access to `*.api.radio-browser.info`, the stream
-hosts, `api.anthropic.com` and, on first use, `openaipublic.azureedge.net` for the
+hosts, your LLM endpoint (your Azure OpenAI resource, `api.openai.com` or
+`api.anthropic.com`) and, on first use, `openaipublic.azureedge.net` for the
 Whisper weights.
 
 ### Secrets and Unity Catalog Volume output
@@ -276,15 +320,22 @@ Whisper weights.
 ```python
 from listen_in import process_station
 
+# Fetch the key however your workspace does it: a Databricks secret scope
+# (including Key Vault-backed scopes) or Azure Key Vault directly (see above).
 api_key = dbutils.secrets.get(scope="listen-in", key="llm-api-key")
 
 result = process_station(
-    station="31074f8a-e6f4-11e9-a96c-52543be04c81",
+    station="31074f8a-e6f4-11e9-a96c-52543be04c81",   # France Info
     language="fr",
     duration_seconds=600,
     output_dir="/Volumes/main/radio/listen_in/outputs",
     whisper_model="small",
-    llm={"provider": "anthropic", "model": "claude-haiku-5-5", "api_key": api_key},
+    llm={
+        "provider": "azure_openai",
+        "model": "<deployment-name>",
+        "base_url": "https://<resource>.openai.azure.com",
+        "api_key": api_key,
+    },
 )
 display(result.model_dump(mode="json"))
 ```
@@ -316,7 +367,10 @@ driver. Whisper is not run through Spark UDFs.
 | `CERTIFICATE_VERIFY_FAILED` while downloading Whisper weights | python.org builds on macOS have no CA bundle until you run *Install Certificates.command*. listen-in falls back to `certifi` automatically; behind a corporate proxy, set `SSL_CERT_FILE` to your organisation's CA bundle. |
 | Transcription is very slow | CPU Whisper is roughly real-time or slower for `small` on a laptop. Use a CUDA GPU, a smaller model (`base`, `tiny`) or shorter recordings. |
 | Names or words are garbled | Smaller Whisper models are weaker on lower-resource languages, phone-ins and music beds. Try `turbo`, `medium` or `large-v3`, or pass `initial_prompt=` with expected names. The LLM records doubtful names under `uncertainties`. |
-| `ConfigurationError: No API key` | Pass `api_key=` or set `LLM_API_KEY` (or `ANTHROPIC_API_KEY`). |
+| `ConfigurationError: No API key` | Pass `api_key=` or set `LLM_API_KEY` (or the provider's own variable: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`). |
+| Azure: `could not find deployment ... (404)` | `model` must be the **deployment name**, `base_url` the resource endpoint (`https://<resource>.openai.azure.com`, no path), and `api_version` one your resource supports. |
+| Azure/OpenAI: request rejected mentioning `response_format` / `json_schema` | The deployment does not support JSON-schema structured outputs; add `"structured_output": "json_object"` to `llm`. |
+| `AnalysisRefusedError: ... content filter` | Azure's content filter blocked the transcript or the response. The transcript is still saved. |
 
 ## Development
 

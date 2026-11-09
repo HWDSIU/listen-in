@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from .utils import DEFAULT_MAX_DURATION_SECONDS, utc_now
 
@@ -156,22 +156,76 @@ class NewsAnalysis(BaseModel):
     stories: list[NewsStory] = Field(description="Empty when no substantive news is present.")
 
 
+PROVIDER_ALIASES = {
+    "openai_compatible": "openai",
+    "azure": "azure_openai",
+    "azure_foundry": "azure_openai",
+}
+DEFAULT_MODELS = {"anthropic": "claude-haiku-5-5"}
+AZURE_DEFAULT_API_VERSION = "2024-12-01-preview"
+
+
 class LLMConfig(_Model):
-    """LLM settings for analysis. ``api_key`` is a SecretStr and is never serialised."""
+    """LLM settings for analysis. ``api_key`` is a SecretStr and is never serialised.
+
+    Providers:
+
+    * ``anthropic`` - Claude via the Anthropic API (default model ``claude-haiku-5-5``).
+    * ``openai`` - the OpenAI API, or any OpenAI-compatible server via ``base_url``.
+    * ``azure_openai`` - Azure OpenAI / Azure AI Foundry. ``base_url`` is the resource
+      endpoint (``https://<resource>.openai.azure.com``), ``model`` is the deployment name.
+    """
 
     provider: str = "anthropic"
-    model: str = "claude-haiku-5-5"
+    model: str | None = Field(
+        default=None,
+        description="Model name; for azure_openai the deployment name. Defaults to "
+        "claude-haiku-5-5 for anthropic and is required for the other providers.",
+    )
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     api_key_env: str = Field(
         default="LLM_API_KEY",
-        description="Environment variable read when api_key is not given "
-        "(ANTHROPIC_API_KEY is also tried for the anthropic provider).",
+        description="Environment variable read when api_key is not given. Provider-specific "
+        "variables are tried next: ANTHROPIC_API_KEY, OPENAI_API_KEY or AZURE_OPENAI_API_KEY.",
     )
-    base_url: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "medium"
-    max_tokens: int = Field(default=16_000, gt=0)
+    base_url: str | None = Field(
+        default=None,
+        description="Custom API base URL; for azure_openai the resource endpoint "
+        "(falls back to $AZURE_OPENAI_ENDPOINT).",
+    )
+    api_version: str | None = Field(
+        default=None, description=f"azure_openai only; defaults to {AZURE_DEFAULT_API_VERSION}."
+    )
+    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None,
+        description="Reasoning effort. Sent as output_config.effort (anthropic) or "
+        "reasoning_effort (openai, azure_openai) only when set; leave unset for models "
+        "without reasoning controls.",
+    )
+    structured_output: Literal["json_schema", "json_object"] = Field(
+        default="json_schema",
+        description="openai/azure_openai: 'json_schema' (strict structured outputs) or "
+        "'json_object' for deployments that do not support JSON schemas.",
+    )
+    max_tokens: int = Field(default=16_000, gt=0, description="Maximum output tokens per call.")
     timeout_seconds: float = Field(default=120.0, gt=0)
     max_retries: int = Field(default=2, ge=0, description="SDK-level retries for transient errors.")
+
+    @field_validator("provider")
+    @classmethod
+    def _normalise_provider(cls, v: str) -> str:
+        v = v.strip().lower()
+        return PROVIDER_ALIASES.get(v, v)
+
+    @model_validator(mode="after")
+    def _default_model(self) -> LLMConfig:
+        if not self.model:
+            if self.provider in DEFAULT_MODELS:
+                self.model = DEFAULT_MODELS[self.provider]
+            elif self.provider in ("openai", "azure_openai"):
+                hint = " (the Azure deployment name)" if self.provider == "azure_openai" else ""
+                raise ValueError(f"model is required for provider {self.provider!r}{hint}")
+        return self
 
 
 class AnalysisResult(_Model):

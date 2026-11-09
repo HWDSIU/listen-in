@@ -195,7 +195,7 @@ def test_anthropic_request_shape_and_no_key_leak(caplog):
 
     provider, httpx2 = _anthropic_with_mock(handler)
     caplog.set_level(logging.DEBUG)
-    r = analyse_transcript(transcript(), config=LLMConfig(api_key=SecretStr(FAKE_KEY)),
+    r = analyse_transcript(transcript(), config=LLMConfig(api_key=SecretStr(FAKE_KEY), effort="medium"),
                            llm_provider=provider, station_name="France Info")
 
     body = seen["body"]
@@ -230,3 +230,15 @@ def test_anthropic_refusal_stop_reason():
     provider, httpx2 = _anthropic_with_mock(handler)
     with pytest.raises(AnalysisRefusedError):
         analyse_transcript(transcript(), llm_provider=provider)
+
+
+def test_anthropic_effort_omitted_unless_set():
+    seen: dict = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx2.Response(200, json=_message(json.dumps(VALID)))
+
+    provider, httpx2 = _anthropic_with_mock(handler)
+    analyse_transcript(transcript(), llm_provider=provider)
+    assert "effort" not in seen["body"]["output_config"]

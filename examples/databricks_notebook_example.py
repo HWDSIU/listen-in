@@ -16,7 +16,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.1.0"
+# MAGIC %pip install "listen-in[whisper,llm-openai,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.2.0"
 
 # COMMAND ----------
 
@@ -35,24 +35,44 @@ dbutils.widgets.text("output_dir", "/Volumes/main/radio/listen_in/outputs", "Out
 # Whisper model: "small" for English, French and most languages; "turbo" for less widely
 # spoken languages such as Swahili (use a GPU cluster or a driver with 16 GB+ RAM).
 dbutils.widgets.text("whisper_model", "small", "Whisper model (small | turbo)")  # noqa: F821
-dbutils.widgets.text("llm_model", "claude-haiku-5-5", "LLM model (blank = transcription only)")  # noqa: F821
+dbutils.widgets.dropdown("llm_provider", "azure_openai", ["none", "azure_openai", "openai", "anthropic"],  # noqa: F821
+                         "LLM provider (none = transcription only)")
+dbutils.widgets.text("llm_model", "", "LLM model / Azure deployment name")  # noqa: F821
+dbutils.widgets.text("llm_endpoint", "", "Azure endpoint (https://<resource>.openai.azure.com)")  # noqa: F821
+dbutils.widgets.text("llm_api_version", "2024-12-01-preview", "Azure API version")  # noqa: F821
 
 station = dbutils.widgets.get("station")  # noqa: F821
 language = dbutils.widgets.get("language")  # noqa: F821
 duration_seconds = int(dbutils.widgets.get("duration_seconds"))  # noqa: F821
 output_dir = dbutils.widgets.get("output_dir")  # noqa: F821
 whisper_model = dbutils.widgets.get("whisper_model")  # noqa: F821
+llm_provider = dbutils.widgets.get("llm_provider")  # noqa: F821
 llm_model = dbutils.widgets.get("llm_model").strip()  # noqa: F821
+llm_endpoint = dbutils.widgets.get("llm_endpoint").strip()  # noqa: F821
+llm_api_version = dbutils.widgets.get("llm_api_version").strip()  # noqa: F821
 
 # COMMAND ----------
 
 from listen_in import process_station
 
+
+def get_llm_api_key() -> str:
+    """Fetch the LLM key. Adapt to how your workspace stores secrets."""
+    # Option A: a Databricks secret scope (can be backed by Azure Key Vault).
+    #   databricks secrets put-secret listen-in llm-api-key
+    return dbutils.secrets.get(scope="listen-in", key="llm-api-key")  # noqa: F821
+    # Option B: Azure Key Vault directly, with the cluster's Azure identity:
+    # from azure.identity import DefaultAzureCredential
+    # from azure.keyvault.secrets import SecretClient
+    # return SecretClient(vault_url="https://<vault>.vault.azure.net",
+    #                     credential=DefaultAzureCredential()).get_secret("<secret-name>").value
+
+
 llm = None
-if llm_model:
-    # Store the key once with:  databricks secrets put-secret listen-in llm-api-key
-    api_key = dbutils.secrets.get(scope="listen-in", key="llm-api-key")  # noqa: F821
-    llm = {"provider": "anthropic", "model": llm_model, "api_key": api_key}
+if llm_provider != "none":
+    llm = {"provider": llm_provider, "model": llm_model or None, "api_key": get_llm_api_key()}
+    if llm_provider == "azure_openai":
+        llm.update(base_url=llm_endpoint, api_version=llm_api_version)
 
 result = process_station(
     station=station,
