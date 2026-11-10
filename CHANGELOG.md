@@ -29,7 +29,8 @@ All notable changes to this project are documented here. The format follows
 - `NewsStory.time_ranges`: one range per stretch of the recording a story covers, so
   a story trailed in the headlines and covered later is located correctly
   (`start`/`end` still give the overall span).
-- `check_transcription_ready()` and `TimeRange` in the public API.
+- `TimeRange` in the public API, and `listen_in.transcription.check_transcription_ready()`
+  for checking Whisper set-up without recording.
 - README note on recording length: designed for snippets up to about 20 minutes.
 
 ### Changed
