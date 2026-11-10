@@ -173,3 +173,42 @@ def test_configurable_max_duration(tmp_path, news_station, fake_ffmpeg):
 def test_filename_must_be_plain_wav(tmp_path, news_station, opts):
     with pytest.raises(InvalidInputError):
         capture_stream(news_station, 5, tmp_path, options=opts, filename="../escape.wav")
+
+
+# ------------------------------------------------------------------- probe
+def test_probe_with_ffprobe_reports_stream_details(monkeypatch, tmp_path, news_station, opts):
+    ffprobe = tmp_path / "bin" / "ffprobe"
+    ffprobe.write_text("#!/bin/sh\nexit 0\n")
+    ffprobe.chmod(0o755)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"], seen["kwargs"] = cmd, kwargs
+        out = '{"streams": [{"codec_name": "aac", "sample_rate": "44100", "channels": 2}]}'
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(capture.subprocess, "run", fake_run)
+    info = capture.probe_stream(news_station, opts)
+    assert info == {"tool": "ffprobe", "codec_name": "aac", "sample_rate": "44100", "channels": 2}
+    assert seen["cmd"][0] == str(ffprobe) and news_station.stream_url in seen["cmd"]
+    assert seen["kwargs"].get("shell") in (None, False)
+
+
+def test_probe_falls_back_to_ffmpeg(monkeypatch, news_station, opts):
+    monkeypatch.setattr(capture.shutil, "which", lambda name: None)  # no ffprobe anywhere
+    stderr = "Input #0, aac, from 'x':\n  Stream #0:0: Audio: aac (LC), 44100 Hz, stereo, fltp, 63 kb/s\n"
+    monkeypatch.setattr(capture.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", stderr))
+    info = capture.probe_stream(news_station, opts)
+    assert info["tool"] == "ffmpeg" and "aac (LC)" in info["stream"]
+
+
+def test_probe_errors(monkeypatch, news_station, opts):
+    monkeypatch.setattr(capture.shutil, "which", lambda name: None)
+    monkeypatch.setattr(capture.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "Connection refused"))
+    with pytest.raises(StreamUnavailableError, match="Connection refused"):
+        capture.probe_stream(news_station, opts)
+    monkeypatch.setattr(capture.subprocess, "run", FakeRun(timeout=True))
+    with pytest.raises(StreamUnavailableError, match="Timed out"):
+        capture.probe_stream(news_station, opts)

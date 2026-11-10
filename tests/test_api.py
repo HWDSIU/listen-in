@@ -63,7 +63,7 @@ def pipeline(monkeypatch):
         return Transcript(text="Il est treize heures.", language=language, model=model,
                           device="cpu", audio_path=path)
 
-    def analyse(transcript, *, config, station_name):
+    def analyse(transcript, *, config, station_name, llm_provider=None):
         state["calls"].append(("analyse", config.model, station_name))
         state["llm_config"] = config
         if state["analyse_error"]:
@@ -77,7 +77,7 @@ def pipeline(monkeypatch):
     monkeypatch.setattr(api, "resolve_station", resolve)
     monkeypatch.setattr(api, "capture_stream", capture)
     monkeypatch.setattr(api, "transcribe_audio", transcribe)
-    def translate(transcript, *, config):
+    def translate(transcript, *, config, llm_provider=None):
         state["calls"].append(("translate", transcript.language))
         if state["translate_error"]:
             raise state["translate_error"]
@@ -87,6 +87,10 @@ def pipeline(monkeypatch):
 
     monkeypatch.setattr(api, "analyse_transcript", analyse)
     monkeypatch.setattr(api, "translate_transcript", translate)
+    # Pre-recording checks: Whisper itself is not installed in every test environment.
+    monkeypatch.setattr(api, "check_transcription_ready",
+                        lambda language, model, device, policy: language.strip().lower() if language else None)
+    monkeypatch.setattr(api, "get_provider", lambda cfg, key: object())
     monkeypatch.setattr(api, "utc_now", lambda: FIXED_NOW)
     return state
 
@@ -318,4 +322,76 @@ def test_station_overrides_set_exact_location(tmp_path, pipeline):
 
 def test_invalid_station_overrides_fail_the_resolve_stage(tmp_path, pipeline):
     r = run(tmp_path, station_overrides={"latitude": "north"})
+    assert r.statuses["resolve"] == "failed" and "station_overrides" in r.stages["resolve"].error
+
+
+# ------------------------------------------------------------ 0.4.1 behaviour
+def test_unknown_provider_fails_before_recording(tmp_path, pipeline, monkeypatch):
+    from listen_in.analysis import get_provider
+
+    monkeypatch.setattr(api, "get_provider", get_provider)
+    with pytest.raises(ConfigurationError, match="Unknown LLM provider"):
+        run(tmp_path, llm={"provider": "anthropc", "model": "m", "api_key": FAKE_KEY})
+    assert pipeline["calls"] == []
+
+
+def test_missing_whisper_fails_before_recording(tmp_path, pipeline, monkeypatch):
+    from listen_in.exceptions import OptionalDependencyError
+    from listen_in.transcription import check_transcription_ready
+
+    monkeypatch.setattr(api, "check_transcription_ready", check_transcription_ready)
+    monkeypatch.setitem(sys.modules, "whisper", None)
+    with pytest.raises(OptionalDependencyError):
+        run(tmp_path)
+    assert pipeline["calls"] == []
+
+
+def test_logged_traceback_never_contains_the_key(tmp_path, pipeline, caplog):
+    try:
+        raise RuntimeError(f"upstream rejected {FAKE_KEY}")
+    except RuntimeError as cause:
+        err = AnalysisError(f"provider failed for {FAKE_KEY}")
+        err.__cause__ = cause
+    pipeline["analyse_error"] = err
+    r = run(tmp_path, llm=LLM)
+    assert r.statuses["analyse"] == "failed"
+    assert "Traceback" in caplog.text and "[REDACTED]" in caplog.text
+    assert FAKE_KEY not in caplog.text
+
+
+def test_keep_audio_false_keeps_recording_if_transcription_fails(tmp_path, pipeline, caplog):
+    pipeline["transcribe_error"] = TranscriptionError("model load failed")
+    r = run(tmp_path, keep_audio=False)
+    assert r.statuses["transcribe"] == "failed"
+    assert (tmp_path / "out" / "audio" / f"{RUN_ID}.wav").exists()
+    assert r.audio_path is not None and "kept for a retry" in caplog.text
+
+
+def test_keep_audio_false_leaves_no_dangling_paths(tmp_path, pipeline):
+    r = run(tmp_path, keep_audio=False)
+    assert r.audio.deleted is True and r.audio.path is None and r.audio_path is None
+    m = json.loads(r.manifest_path.read_text())
+    assert m["audio"]["deleted"] is True and m["audio"]["path"] is None and m["audio_path"] is None
+    assert m["transcript"]["audio_path"] is None
+    assert json.loads(r.transcript_path.read_text())["audio_path"] is None
+
+
+def test_manifest_leaves_out_machine_details_and_endpoint(tmp_path, pipeline):
+    llm = {**LLM, "base_url": "https://private-resource.example.com"}
+    r = run(tmp_path, llm=llm)
+    m = json.loads(r.manifest_path.read_text())
+    assert "output_dir" not in m
+    assert "ffmpeg_path" not in m["audio"]
+    assert "base_url" not in m["llm"] and m["llm"]["model"] == "claude-haiku-5-5"
+    assert "private-resource" not in r.manifest_path.read_text()
+    assert r.output_dir  # still available in Python
+
+
+def test_transcript_file_uses_relative_audio_path(tmp_path, pipeline):
+    r = run(tmp_path)
+    assert json.loads(r.transcript_path.read_text())["audio_path"] == f"audio/{RUN_ID}.wav"
+
+
+def test_impossible_override_coordinates_are_rejected(tmp_path, pipeline):
+    r = run(tmp_path, station_overrides={"latitude": 999, "longitude": -500})
     assert r.statuses["resolve"] == "failed" and "station_overrides" in r.stages["resolve"].error

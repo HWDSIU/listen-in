@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-10
+
+### Fixed
+- A correct hint for a closely related language is no longer overridden. Whisper's
+  detector can't tell Hindi/Urdu, Serbian/Croatian/Bosnian, Malay/Indonesian,
+  Norwegian Bokmål/Nynorsk or Persian/Tajik apart from audio; an Urdu station hinted
+  `"ur"` was being transcribed as Hindi. The mismatch check now scores the hint's
+  whole group.
+- Set-up mistakes now raise before recording instead of after it: a missing Whisper
+  or LLM package, an unknown language code, Whisper model or LLM provider, CUDA
+  requested but unavailable, or a missing Azure endpoint. The LLM client is built once
+  and reused for translation and analysis.
+- Tracebacks logged for failed stages are redacted, so an API key inside an exception
+  message never reaches the logs.
+- `keep_audio=False` now deletes the recording only after the transcript is saved; if
+  transcription fails the recording is kept for a retry. The manifest and transcript
+  file no longer point at a deleted file (`audio.deleted` is `true`, paths `null`).
+- `station_overrides` rejects impossible coordinates.
+
+### Added
+- `NewsStory.time_ranges`: one range per stretch of the recording a story covers, so
+  a story trailed in the headlines and covered later is located correctly
+  (`start`/`end` still give the overall span).
+- `check_transcription_ready()` and `TimeRange` in the public API.
+- README note on recording length: designed for snippets up to about 20 minutes.
+
+### Changed
+- Manifests leave out the output folder's location, the ffmpeg path and the LLM
+  endpoint URL. The transcript file's `audio_path` is relative to the output folder.
+- CI uses the current major versions of the GitHub Actions it relies on.
+
+### Removed
+- Unused `platformdirs` dependency.
+
 ## [0.4.0] - 2026-11-09
 
 ### Added

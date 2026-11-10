@@ -36,6 +36,16 @@ DETECTION_WINDOWS = 5
 #: A hint is overridden only when detection is confident AND gives the hint almost no weight.
 MISMATCH_MIN_DETECTED_PROBABILITY = 0.5
 MISMATCH_MAX_HINT_PROBABILITY = 0.1
+#: Languages that sound the same (or nearly) and differ mostly in script or spelling, so
+#: Whisper's detector cannot reliably tell them apart from audio. A hint in one of these
+#: groups is judged by the whole group's probability and is never swapped for a sibling.
+RELATED_LANGUAGES: tuple[frozenset[str], ...] = (
+    frozenset({"hi", "ur"}),          # Hindi / Urdu
+    frozenset({"sr", "hr", "bs"}),    # Serbian / Croatian / Bosnian
+    frozenset({"ms", "id"}),          # Malay / Indonesian
+    frozenset({"no", "nn"}),          # Norwegian Bokmål / Nynorsk
+    frozenset({"fa", "tg"}),          # Persian / Tajik
+)
 _MODELS_LOCK = threading.Lock()
 
 
@@ -49,6 +59,45 @@ def _import_whisper() -> tuple[Any, Any, Any]:
         package = {"whisper": "openai-whisper"}.get(missing, missing)
         raise OptionalDependencyError(package, "whisper", "Transcription") from exc
     return whisper, torch, np
+
+
+def language_group(code: str) -> frozenset[str]:
+    """The set of languages Whisper cannot reliably separate from ``code`` (at least itself)."""
+    for group in RELATED_LANGUAGES:
+        if code in group:
+            return group
+    return frozenset({code})
+
+
+def check_transcription_ready(
+    language: str | None,
+    model: str = "small",
+    device: str = "auto",
+    on_language_mismatch: str = "use_detected",
+) -> str | None:
+    """Check everything transcription needs, without loading or downloading the model.
+
+    Raises :class:`OptionalDependencyError` if Whisper is not installed,
+    :class:`InvalidInputError` for an unknown language code, model name or mismatch
+    policy, and :class:`TranscriptionError` if CUDA is requested but unavailable.
+    Returns the normalised language code. :func:`listen_in.process_station` calls this
+    before recording, so set-up mistakes surface immediately.
+    """
+    whisper, torch, _ = _import_whisper()
+    if language is not None:
+        language = language.strip().lower()
+        if language not in whisper.tokenizer.LANGUAGES:
+            raise InvalidInputError(f"Unsupported Whisper language code: {language!r}")
+    if model not in whisper.available_models() and not Path(model).expanduser().is_file():
+        raise InvalidInputError(
+            f"Unknown Whisper model {model!r}. Use one of {', '.join(whisper.available_models())} "
+            "or a path to a checkpoint file."
+        )
+    if on_language_mismatch not in ("use_detected", "use_hint", "error"):
+        raise InvalidInputError(f"on_language_mismatch must be use_detected, use_hint or error, "
+                                f"not {on_language_mismatch!r}")
+    resolve_device(device, torch)
+    return language
 
 
 def resolve_device(device: str, torch: Any) -> str:
@@ -164,7 +213,8 @@ def transcribe_audio(
     detected language. Whisper treats its language setting as an instruction, not a
     hint: given the wrong language it quietly *translates* into it. So the hint is
     checked first with Whisper's language ID over several windows of the audio. If
-    detection is confident (>= 50 %) and gives the hint almost no weight (< 10 %),
+    detection is confident (>= 50 %) and gives the hint almost no weight (< 10 %; for
+    closely related languages such as Urdu/Hindi or Serbian/Croatian the whole group counts),
     ``on_language_mismatch`` decides: ``"use_detected"`` (default; keeps the original
     language and logs a warning), ``"use_hint"`` or ``"error"``. The outcome is
     recorded on the transcript (``language_hint``, ``detected_language``,
@@ -176,20 +226,17 @@ def transcribe_audio(
     ``condition_on_previous_text`` defaults to False because radio audio mixes music
     and speech and conditioning makes repetition loops likelier.
     """
-    path = Path(audio.path if isinstance(audio, AudioCapture) else audio)
+    if isinstance(audio, AudioCapture):
+        if audio.path is None:
+            raise InvalidInputError("This recording was deleted (keep_audio=False); nothing to transcribe.")
+        audio = audio.path
+    path = Path(audio)
     if not path.is_file():
         raise InvalidInputError(f"Audio file not found: {path}")
     if "task" in whisper_options:
         raise InvalidInputError("listen-in always uses task='transcribe'; translation is done by the LLM.")
+    language = check_transcription_ready(language, model, device, on_language_mismatch)
     whisper, _torch, np = _import_whisper()
-    if language is not None:
-        language = language.strip().lower()
-        if language not in whisper.tokenizer.LANGUAGES:
-            raise InvalidInputError(f"Unsupported Whisper language code: {language!r}")
-
-    if on_language_mismatch not in ("use_detected", "use_hint", "error"):
-        raise InvalidInputError(f"on_language_mismatch must be use_detected, use_hint or error, "
-                                f"not {on_language_mismatch!r}")
 
     sw = Stopwatch()
     m = load_whisper_model(model, device, download_root)
@@ -211,7 +258,8 @@ def transcribe_audio(
         if language is None:
             use_language = detected
         elif detected != language:
-            hint_p = probs.get(language, 0.0)
+            # Closely related languages (e.g. Urdu/Hindi) count as one for this check.
+            hint_p = sum(probs.get(code, 0.0) for code in language_group(language))
             if detected_p >= MISMATCH_MIN_DETECTED_PROBABILITY and hint_p < MISMATCH_MAX_HINT_PROBABILITY:
                 mismatch = True
                 msg = (f"Language hint {language!r} does not match the audio: Whisper detected "

@@ -37,8 +37,8 @@ class Station(_Model):
     subdivision_code: str | None = Field(
         default=None, description="ISO 3166-2 subdivision code (Radio Browser 'iso_3166_2'), e.g. 'DE-BE'."
     )
-    latitude: float | None = Field(default=None, description="Latitude; see location_precision.")
-    longitude: float | None = Field(default=None, description="Longitude; see location_precision.")
+    latitude: float | None = Field(default=None, ge=-90, le=90, description="Latitude; see location_precision.")
+    longitude: float | None = Field(default=None, ge=-180, le=180, description="Longitude; see location_precision.")
     location_precision: Literal["station", "subdivision", "country"] | None = Field(
         default=None,
         description="How exact latitude/longitude are: 'station' (Radio Browser or your own "
@@ -106,9 +106,10 @@ class CaptureOptions(_Model):
 
 
 class AudioCapture(_Model):
-    """A completed recording on disk."""
+    """A completed recording."""
 
-    path: Path
+    path: Path | None = Field(description="The WAV file; None once deleted (keep_audio=False).")
+    deleted: bool = Field(default=False, description="True if the file was deleted after transcription.")
     station: Station
     started_at: datetime
     finished_at: datetime
@@ -189,6 +190,13 @@ class Entity(BaseModel):
     )
 
 
+class TimeRange(BaseModel):
+    """A stretch of the recording, in seconds from the start."""
+
+    start: float
+    end: float
+
+
 class NewsStory(BaseModel):
     """One story in the broadcast. Field names match the published analysis schema."""
 
@@ -212,8 +220,17 @@ class NewsStory(BaseModel):
         description="Ids of the transcript segments ([n] markers) this story comes from."
     )
     # Filled in by listen-in from segment_ids (not requested from the model).
-    start: SkipJsonSchema[float | None] = Field(default=None, description="Story start, seconds into the recording.")
-    end: SkipJsonSchema[float | None] = Field(default=None, description="Story end, seconds into the recording.")
+    time_ranges: SkipJsonSchema[list[TimeRange]] = Field(
+        default_factory=list,
+        description="Where the story is in the recording: one range per run of consecutive segments. "
+        "A story mentioned in the headlines and again later has several.",
+    )
+    start: SkipJsonSchema[float | None] = Field(
+        default=None, description="Start of the first time range (seconds into the recording)."
+    )
+    end: SkipJsonSchema[float | None] = Field(
+        default=None, description="End of the last time range; may span other stories in between."
+    )
 
 
 class NewsAnalysis(BaseModel):

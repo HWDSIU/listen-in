@@ -296,3 +296,13 @@ def test_model_cannot_set_story_times_and_unknown_topics_are_rejected():
     p = FakeProvider(ok(bad), ok())
     r = analyse_transcript(segmented(), llm_provider=p)
     assert r.repaired is True and "topics" in p.calls[1]["messages"][-1]["content"]
+
+
+def test_story_time_ranges_split_where_segments_are_not_consecutive():
+    trailed = {**VALID["stories"][0], "segment_ids": [0, 2]}       # headline, then later coverage
+    continuous = {**VALID["stories"][0], "segment_ids": [1, 2]}
+    r = analyse_transcript(segmented(), llm_provider=FakeProvider(ok({**VALID, "stories": [trailed, continuous]})))
+    a, b = r.analysis.stories
+    assert [(t.start, t.end) for t in a.time_ranges] == [(0.0, 3.5), (8.0, 11.5)]
+    assert (a.start, a.end) == (0.0, 11.5)
+    assert [(t.start, t.end) for t in b.time_ranges] == [(4.0, 11.5)]

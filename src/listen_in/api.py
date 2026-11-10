@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import logging
 import shutil
+import traceback
 from pathlib import Path
 from typing import Any
 
 from pydantic import SecretStr, ValidationError
 
 from ._version import __version__
-from .analysis import analyse_transcript, coerce_llm_config, resolve_api_key
+from .analysis import LLMProvider, analyse_transcript, coerce_llm_config, get_provider, resolve_api_key
 from .capture import capture_stream, probe_stream
-from .exceptions import InvalidInputError
+from .exceptions import CaptureError, InvalidInputError
 from .models import (
     BilingualTranscript,
     CaptureOptions,
@@ -33,13 +34,14 @@ from .models import (
 )
 from .radio_browser import resolve_station
 from .storage import OutputLayout, default_staging_dir, publish_file, write_json, write_text
-from .transcription import LanguageMismatchPolicy, transcribe_audio
+from .transcription import LanguageMismatchPolicy, check_transcription_ready, transcribe_audio
 from .translation import translate_transcript
 from .utils import (
     Stopwatch,
     build_run_id,
     describe_error,
     extract_uuid,
+    redact,
     slugify,
     utc_now,
     validate_duration,
@@ -88,8 +90,13 @@ def process_station(
 
     Stage failures do not raise: they are recorded in ``result.stages`` and every
     artefact produced before the failure is kept. A JSON manifest is always written
-    to ``<output_dir>/manifests/``. Invalid arguments raise immediately, before any
-    recording starts. Pass ``llm=None`` for transcription only.
+    to ``<output_dir>/manifests/``. Set-up problems raise immediately, before any
+    recording starts: invalid arguments, a missing Whisper or LLM package, an unknown
+    language code, Whisper model or LLM provider, or a missing API key or Azure
+    endpoint. Pass ``llm=None`` for transcription only.
+
+    ``keep_audio=False`` deletes the recording once the transcript is saved; if
+    transcription fails, the recording is kept so the run can be retried.
 
     ``language`` is checked against the audio before transcribing; a clearly wrong
     hint is replaced by the detected language unless ``on_language_mismatch`` says
@@ -103,15 +110,18 @@ def process_station(
         raise InvalidInputError(
             "language must be an ISO 639-1 code such as 'fr' or 'en', or None."
         )
-    language = language.strip().lower() if language else None
+    # Fail fast: check everything that does not need the audio before recording it.
+    language = check_transcription_ready(language, whisper_model, device, on_language_mismatch)
     layout = OutputLayout.create(output_dir)
 
     llm_cfg: LLMConfig | None = None
     api_key: str | None = None
+    llm_provider: LLMProvider | None = None
     if llm is not None:
         llm_cfg = coerce_llm_config(llm)
-        api_key = resolve_api_key(llm_cfg)  # fail fast, before a long recording
+        api_key = resolve_api_key(llm_cfg)
         llm_cfg = llm_cfg.model_copy(update={"api_key": SecretStr(api_key)})
+        llm_provider = get_provider(llm_cfg, api_key)  # unknown provider, missing SDK or endpoint
     secrets = [api_key]
 
     started_at = utc_now()
@@ -132,8 +142,11 @@ def process_station(
         stages[stage].status = "failed"
         stages[stage].seconds = sw.seconds
         stages[stage].error = describe_error(exc, secrets)
-        log.error("%s failed for %s: %s", stage, result.run_id, stages[stage].error,
-                  exc_info=not isinstance(exc, InvalidInputError))
+        # The traceback is formatted here and redacted, so an API key that ends up in
+        # an exception message never reaches the logs.
+        trace = "" if isinstance(exc, InvalidInputError) else "\n" + redact(
+            "".join(traceback.format_exception(exc)).rstrip(), secrets)
+        log.error("%s failed for %s: %s%s", stage, result.run_id, stages[stage].error, trace)
 
     def skip_from(stage_names: tuple[str, ...]) -> None:
         for s in stage_names:
@@ -159,6 +172,8 @@ def process_station(
         audio = capture_stream(st, duration, stage_dir / result.run_id, options=options,
                                overwrite=True, filename=f"{result.run_id}.wav")
         staged = audio.path
+        if staged is None:  # pragma: no cover - capture_stream always returns the file
+            raise CaptureError("Recording finished without a file.")
         final = publish_file(staged, layout.audio / staged.name, overwrite=overwrite, move=True)
         shutil.rmtree(stage_dir / result.run_id, ignore_errors=True)
         audio = audio.model_copy(update={"path": final})
@@ -176,8 +191,12 @@ def process_station(
         transcript = transcribe_audio(final, language=language, model=whisper_model,
                                       device=device, initial_prompt=initial_prompt,
                                       on_language_mismatch=on_language_mismatch)
+        if not keep_audio:
+            transcript = transcript.model_copy(update={"audio_path": None})
         tpath = layout.transcripts / f"{result.run_id}.json"
-        write_json(tpath, transcript, overwrite=overwrite)
+        transcript_file = transcript.model_dump(mode="json")
+        transcript_file["audio_path"] = _relative(transcript.audio_path, layout.root)
+        write_json(tpath, transcript_file, overwrite=overwrite)
         write_text(tpath.with_suffix(".txt"), transcript.text + "\n", overwrite=overwrite)
         result.transcript, result.transcript_path = transcript, tpath
         result.language = transcript.language
@@ -185,11 +204,14 @@ def process_station(
     except Exception as exc:  # noqa: BLE001 - isolate stages; recorded in result
         fail("transcribe", exc, sw)
         skip_from(("translate", "analyse"))
+        if not keep_audio:
+            log.warning("Transcription failed, so the recording was kept for a retry "
+                        "despite keep_audio=False: %s", final)
         return _persist(result, layout, overwrite, secrets)
-    finally:
-        if not keep_audio and result.audio_path:
-            Path(result.audio_path).unlink(missing_ok=True)
-            result.audio_path = None
+    if not keep_audio:  # only once the transcript is safely written
+        Path(final).unlink(missing_ok=True)
+        result.audio = audio.model_copy(update={"path": None, "deleted": True})
+        result.audio_path = None
 
     # 4. translate (optional: non-English broadcasts, LLM configured) ---------
     skip_reason = (
@@ -204,7 +226,7 @@ def process_station(
     else:
         sw = Stopwatch()
         try:
-            translation = translate_transcript(transcript, config=llm_cfg)
+            translation = translate_transcript(transcript, config=llm_cfg, llm_provider=llm_provider)
             en_path = layout.transcripts / f"{result.run_id}.en.txt"
             write_text(en_path, translation.text_en + "\n", overwrite=overwrite)
             result.translation, result.translation_path = translation, en_path
@@ -218,7 +240,8 @@ def process_station(
     else:
         sw = Stopwatch()
         try:
-            analysis = analyse_transcript(transcript, config=llm_cfg, station_name=st.name or None)
+            analysis = analyse_transcript(transcript, config=llm_cfg, station_name=st.name or None,
+                                          llm_provider=llm_provider)
             analysis = analysis.model_copy(update={
                 "run": run_context(result),
                 "transcript": bilingual_transcript(transcript, result.translation),
@@ -246,31 +269,41 @@ def run_context(result: ProcessingResult) -> RunContext:
     )
 
 
-#: Left out of the manifest because they repeat other fields: audio.station is the
-#: top-level station, and analysis.transcript is transcript + translation.
-MANIFEST_EXCLUDE: dict[str, Any] = {"audio": {"station"}, "analysis": {"transcript"}}
+#: Left out of the manifest. audio.station repeats the top-level station and
+#: analysis.transcript repeats transcript + translation; output_dir and ffmpeg_path are
+#: details of the machine the run happened on.
+MANIFEST_EXCLUDE: dict[str, Any] = {
+    "output_dir": True,
+    "audio": {"station", "ffmpeg_path"},
+    "analysis": {"transcript"},
+}
+#: LLM settings left out of the manifest: the endpoint URL can identify a private resource.
+MANIFEST_LLM_EXCLUDE = ("base_url",)
 _PATH_FIELDS = ("audio_path", "transcript_path", "translation_path", "analysis_path", "manifest_path")
 
 
+def _relative(value: Any, root: Path) -> Any:
+    """``value`` as a POSIX path relative to ``root`` when it lies inside it."""
+    if not value:
+        return None if value is None else value
+    try:
+        return Path(value).resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(value)
+
+
 def manifest_dict(result: ProcessingResult, output_root: Path) -> dict[str, Any]:
-    """The manifest JSON: no repeated blocks, file paths relative to ``output_dir``."""
+    """The manifest JSON: nothing repeated, no machine details, paths relative to ``output_dir``."""
     data = result.model_dump(mode="json", exclude=MANIFEST_EXCLUDE)
-
-    def rel(value: Any) -> Any:
-        if not value:
-            return value
-        path = Path(value)
-        try:
-            return path.resolve().relative_to(output_root.resolve()).as_posix()
-        except (ValueError, OSError):
-            return value
-
     for key in _PATH_FIELDS:
-        data[key] = rel(data.get(key))
+        data[key] = _relative(data.get(key), output_root)
     if data.get("audio"):
-        data["audio"]["path"] = rel(data["audio"].get("path"))
+        data["audio"]["path"] = _relative(data["audio"].get("path"), output_root)
     if data.get("transcript"):
-        data["transcript"]["audio_path"] = rel(data["transcript"].get("audio_path"))
+        data["transcript"]["audio_path"] = _relative(data["transcript"].get("audio_path"), output_root)
+    if data.get("llm"):
+        for key in MANIFEST_LLM_EXCLUDE:
+            data["llm"].pop(key, None)
     return data
 
 

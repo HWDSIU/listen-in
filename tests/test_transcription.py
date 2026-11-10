@@ -64,7 +64,9 @@ def fake_whisper(monkeypatch):
     whisper = types.ModuleType("whisper")
     whisper.load_model = load_model
     whisper.load_audio = load_audio
-    whisper.tokenizer = types.SimpleNamespace(LANGUAGES={"en": "english", "fr": "french", "de": "german"})
+    whisper.tokenizer = types.SimpleNamespace(LANGUAGES={"en": "english", "fr": "french", "de": "german",
+                                                         "ur": "urdu", "hi": "hindi"})
+    whisper.available_models = lambda: ["tiny", "base", "small", "medium", "large-v3", "turbo"]
     whisper.pad_or_trim = lambda a, length=480_000: a[:length]
     whisper.log_mel_spectrogram = lambda audio, n_mels=80, **kw: FakeMel()
     torch = types.ModuleType("torch")
@@ -208,3 +210,65 @@ def test_detection_failure_falls_back_to_hint(fake_whisper, tmp_path):
 def test_invalid_mismatch_policy(fake_whisper, tmp_path):
     with pytest.raises(InvalidInputError):
         transcribe_audio(write_wav(tmp_path / "a.wav", 1), language="fr", on_language_mismatch="ignore")
+
+
+# ------------------------------------------------- closely related languages
+def test_related_language_hint_is_kept(fake_whisper, tmp_path):
+    # Real case: an Urdu station that Whisper's detector scores as Hindi 76 %, Urdu 9 %.
+    fake_whisper.set_probs({"hi": 0.76, "en": 0.12, "ur": 0.09})
+    t = transcribe_audio(write_wav(tmp_path / "a.wav", 5), language="ur")
+    assert fake_whisper.models[0].calls[0]["language"] == "ur"
+    assert (t.language, t.language_mismatch, t.detected_language) == ("ur", False, "hi")
+
+
+def test_unrelated_wrong_hint_is_still_replaced(fake_whisper, tmp_path):
+    fake_whisper.set_probs({"de": 0.97, "hi": 0.01, "ur": 0.01, "en": 0.01})
+    t = transcribe_audio(write_wav(tmp_path / "a.wav", 5), language="ur")
+    assert t.language == "de" and t.language_mismatch is True
+
+
+def test_language_groups():
+    from listen_in.transcription import language_group
+
+    assert language_group("sr") == {"sr", "hr", "bs"}
+    assert language_group("ur") == {"ur", "hi"}
+    assert language_group("fr") == {"fr"}
+
+
+# ------------------------------------------------------ checks before recording
+def test_readiness_check_catches_setup_mistakes(fake_whisper, tmp_path):
+    from listen_in.exceptions import TranscriptionError
+    from listen_in.transcription import check_transcription_ready
+
+    assert check_transcription_ready(" FR ", "small") == "fr"
+    with pytest.raises(InvalidInputError, match="Unknown Whisper model"):
+        check_transcription_ready("fr", "smal")
+    ckpt = tmp_path / "custom.pt"
+    ckpt.write_bytes(b"x")
+    assert check_transcription_ready("fr", str(ckpt)) == "fr"  # a checkpoint path is fine
+    with pytest.raises(InvalidInputError, match="language code"):
+        check_transcription_ready("xx", "small")
+    with pytest.raises(TranscriptionError, match="CUDA"):
+        check_transcription_ready("fr", "small", device="cuda")
+    assert fake_whisper.loads == []  # nothing loaded or downloaded
+
+
+def test_readiness_check_without_whisper(monkeypatch):
+    from listen_in.transcription import check_transcription_ready
+
+    monkeypatch.setitem(sys.modules, "whisper", None)
+    with pytest.raises(OptionalDependencyError):
+        check_transcription_ready("fr", "small")
+
+
+def test_deleted_recording_cannot_be_transcribed(fake_whisper, tmp_path):
+    from datetime import datetime, timezone
+
+    from listen_in.models import AudioCapture, Station
+
+    now = datetime.now(timezone.utc)
+    gone = AudioCapture(path=None, deleted=True, station=Station(stream_url="https://example.org/s"),
+                        started_at=now, finished_at=now, requested_duration_seconds=5, duration_seconds=5,
+                        sample_rate=16_000, channels=1, size_bytes=0, ffmpeg_path="ffmpeg")
+    with pytest.raises(InvalidInputError, match="deleted"):
+        transcribe_audio(gone, language="fr")

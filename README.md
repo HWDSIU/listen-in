@@ -27,7 +27,7 @@ print(result.statuses)
 print(result.analysis.analysis.summary_en)
 ```
 
-> **Status:** alpha (0.4.0). The API may change before 1.0.
+> **Status:** alpha (0.4.1). The API may change before 1.0.
 
 [![tests](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml/badge.svg)](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml)
 
@@ -63,7 +63,8 @@ Radio broadcasts are copyrighted. Before recording, storing or processing a stat
 make sure you are permitted to do so under the station's terms and the laws that
 apply to you (copyright, broadcasting and data-protection law). Phone-ins and
 interviews may contain personal data. Keep recordings only as long as you need them;
-`process_station(..., keep_audio=False)` deletes audio after transcription. Do not
+`process_station(..., keep_audio=False)` deletes the audio once the transcript is saved
+(it is kept if transcription fails, so the run can be retried). Do not
 redistribute captured audio or transcripts. Machine transcripts and LLM output
 contain errors, so check anything important against the source audio.
 
@@ -75,7 +76,7 @@ Python 3.10 or later. listen-in is **not yet published on PyPI**, so install a t
 release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.0"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.1"
 ```
 
 Swap `llm-anthropic` for `llm-openai` to use OpenAI or Azure OpenAI / AI Foundry (or
@@ -85,7 +86,7 @@ package is on PyPI this will become `pip install "listen-in[whisper,llm-anthropi
 
 | Extra | Adds | Needed for |
 |---|---|---|
-| *(none)* | `httpx`, `pydantic`, `platformdirs` | station resolution, models |
+| *(none)* | `httpx`, `pydantic` | station resolution, models |
 | `whisper` | `openai-whisper` (+ PyTorch), `numpy`, `certifi` | transcription |
 | `llm-anthropic` | `anthropic` | translation and analysis with Claude |
 | `llm-openai` | `openai` | translation and analysis with OpenAI or Azure OpenAI / AI Foundry |
@@ -105,7 +106,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.0` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.1` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then
 `$LISTEN_IN_FFMPEG`, then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -163,9 +164,19 @@ else:
 `process_station` runs resolve → capture → transcribe → translate → analyse → persist
 and returns a `ProcessingResult` with everything it produced, the file paths, and a
 status and timing for each stage. A failed stage never deletes earlier artefacts: if
-analysis fails, for example, the transcript is still saved. Each step can also be
-called on its own: `resolve_station`, `capture_stream`, `transcribe_audio`,
-`translate_transcript` and `analyse_transcript`.
+analysis fails, for example, the transcript is still saved. Set-up problems are caught
+before recording starts and raise straight away: a missing Whisper or LLM package, an
+unknown language code, Whisper model or LLM provider, a missing API key or Azure
+endpoint. Each step can also be called on its own: `resolve_station`, `capture_stream`,
+`transcribe_audio`, `translate_transcript` and `analyse_transcript`.
+
+**Recording length.** listen-in is designed for snippets, such as a bulletin or an
+interview, typically up to about 20 minutes. Each analysis is a single LLM response
+covering every story, so much longer recordings of dense news (roughly 25 minutes or
+more) can exceed the default output limit and fail with *"Response truncated at
+max_tokens"*. The transcript and translation are still saved. Record shorter segments,
+or raise the limit if your model allows it, with a longer timeout to match:
+`llm={..., "max_tokens": 32000, "timeout_seconds": 300}`.
 
 ### Two-station example
 
@@ -264,6 +275,13 @@ recording is transcribed in the detected language and a warning is logged.
 A correct hint is never overridden by short stretches of another language, such as
 adverts or quotes in English.
 
+Some languages sound the same, or nearly, and differ mainly in script or spelling, so
+Whisper's detector can't tell them apart from audio: Hindi/Urdu, Serbian/Croatian/Bosnian,
+Malay/Indonesian, Norwegian Bokmål/Nynorsk and Persian/Tajik. A hint in one of these
+groups is never swapped for a sibling. For example, an Urdu station hinted `"ur"` stays in
+Urdu script even if the detector leans towards Hindi. For these languages, always pass
+the hint; without one, the detector's guess decides the script.
+
 The transcript records what happened: `language` (what Whisper transcribed in),
 `language_hint`, `detected_language`, `detected_language_probability` and
 `language_mismatch`.
@@ -286,7 +304,11 @@ never overwritten unless you pass `overwrite=True`.
 The manifest is the complete record of a run: station, recording, transcript,
 translation, analysis, LLM settings (never the key) and each stage's status, timing and
 errors. It is written even when a stage fails. Nothing in it is repeated, and file paths
-in it are relative to `output_dir`, so the folder can be moved or copied.
+in it are relative to the output folder, so the folder can be moved or copied. It leaves
+out details of the machine and account it ran on: the output folder's location, the
+ffmpeg path and the LLM endpoint URL (the provider, model or deployment name and API
+version are kept). With `keep_audio=False`, `audio.deleted` is `true` and the audio paths
+are `null`.
 `language_hint` is the language you asked for (`null` = detect) and `language` the
 language the transcript is in.
 
@@ -321,7 +343,9 @@ described below).
       ],
       "key_claims": ["..."],
       "uncertainties": ["'MDF' is likely a transcription of MEDEF."],
-      "segment_ids": [3, 4, 5], "start": 12.4, "end": 41.0
+      "segment_ids": [3, 4, 5, 41, 42],
+      "time_ranges": [{"start": 12.4, "end": 41.0}, {"start": 302.5, "end": 330.1}],
+      "start": 12.4, "end": 330.1
     }]
   },
   "transcript": {"...": "original and English, see below"}
@@ -339,9 +363,11 @@ described below).
   business, labour, conflict, security, crime_justice, health, environment,
   science_technology, education, society, migration, culture, religion, sport, weather,
   transport, disaster, international, other.
-- **`segment_ids`, `start`, `end`**: which transcript segments the story comes from, and
-  so where it is in the recording (seconds). Use them to show the exact quote or play
-  the clip. listen-in computes `start`/`end` from the segments; the model only names
+- **`segment_ids`, `time_ranges`**: which transcript segments the story comes from, and
+  so where it is in the recording (seconds). A story trailed in the headlines and covered
+  later has one range per stretch. Use them to show the exact quote or play the clip.
+  `start`/`end` are the first range's start and the last range's end, so they can span
+  other stories. listen-in computes the times from the segments; the model only names
   the segments.
 - `translation_used` is the model's own flag (did it translate to write this analysis);
   `transcript.translated` says whether listen-in produced a full English translation.
@@ -384,7 +410,8 @@ Every station carries `latitude`, `longitude` and `location_precision`:
 | `null` | Unknown country, or a direct stream URL |
 
 Supply or correct a station's details with `station_overrides`. Coordinates given this
-way count as `station` precision unless you say otherwise:
+way count as `station` precision unless you say otherwise, and must be valid (latitude
+−90 to 90, longitude −180 to 180):
 
 ```python
 process_station("31074f8a-e6f4-11e9-a96c-52543be04c81", language="fr",
@@ -425,7 +452,7 @@ for r in analysed:
 ```
 
 Use `canonical_name` to merge spellings, `uncertain` to filter or down-weight guesses,
-`topics` to filter, and `start`/`end` to link a story back to the audio.
+`topics` to filter, and `time_ranges` to link a story back to the audio.
 
 ## Troubleshooting
 
@@ -439,6 +466,8 @@ Use `canonical_name` to merge spellings, `uncertain` to filter or down-weight gu
 | Names or words are garbled | Smaller Whisper models are weaker on less widely spoken languages, phone-ins and music beds. Try `turbo`, `medium` or `large-v3`, or pass `initial_prompt=` with expected names. The LLM records doubtful names under `uncertainties` and marks uncertain entities. |
 | Transcript is in the wrong language (e.g. English text for a German station) | The `language` hint was wrong and Whisper translated into it. Since 0.3.0 a clearly wrong hint is replaced by the detected language (`transcript.language_mismatch` is `true`). Pass the right code or `language=None`. |
 | A station has no location on the map | Radio Browser had no coordinates and no known country. Pass `station_overrides={"latitude": ..., "longitude": ...}`. |
+| `AnalysisError: Response truncated at max_tokens` | The recording is too long for one analysis response (see *Recording length*). Record shorter segments, or raise `max_tokens` together with `timeout_seconds`. The transcript and translation are still saved. |
+| A correct hint for Urdu, Serbian, Malay... came out in a sibling language | Since 0.4.1, hints in closely related groups are kept. Without a hint, the detector's guess decides, so pass the hint. |
 | `ConfigurationError: No API key` | Pass `api_key=` or set `LLM_API_KEY` (or the provider's own variable: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`). |
 | Azure: `could not find deployment ... (404)` | `model` must be the **deployment name**, `base_url` the resource endpoint (`https://<resource>.openai.azure.com`, no path), and `api_version` one your resource supports. |
 | Azure/OpenAI: request rejected mentioning `response_format` / `json_schema` | The deployment does not support JSON-schema structured outputs; add `"structured_output": "json_object"` to `llm`. |

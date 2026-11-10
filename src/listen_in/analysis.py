@@ -28,7 +28,7 @@ from .exceptions import (
     ConfigurationError,
     OptionalDependencyError,
 )
-from .models import AZURE_DEFAULT_API_VERSION, AnalysisResult, LLMConfig, NewsAnalysis, Transcript
+from .models import AZURE_DEFAULT_API_VERSION, AnalysisResult, LLMConfig, NewsAnalysis, TimeRange, Transcript
 from .utils import Stopwatch, redact
 
 log = logging.getLogger(__name__)
@@ -79,15 +79,29 @@ def build_user_message(transcript: Transcript, station_name: str | None = None) 
 
 
 def add_story_times(analysis: NewsAnalysis, transcript: Transcript) -> NewsAnalysis:
-    """Keep only segment ids that exist and set each story's start/end from them."""
+    """Keep only segment ids that exist and work out where each story is in the recording.
+
+    Consecutive segments form one :class:`TimeRange`; a story that is trailed in the
+    headlines and covered later gets one range per stretch. ``start``/``end`` are the
+    first range's start and the last range's end.
+    """
+    position = {s.id: i for i, s in enumerate(transcript.segments)}
     by_id = {s.id: s for s in transcript.segments}
     stories = []
     for story in analysis.stories:
-        ids = sorted({i for i in story.segment_ids if i in by_id})
+        ids = sorted({i for i in story.segment_ids if i in by_id}, key=position.__getitem__)
+        runs: list[list[int]] = []
+        for i in ids:
+            if runs and position[i] == position[runs[-1][-1]] + 1:
+                runs[-1].append(i)
+            else:
+                runs.append([i])
+        ranges = [TimeRange(start=by_id[run[0]].start, end=by_id[run[-1]].end) for run in runs]
         stories.append(story.model_copy(update={
             "segment_ids": ids,
-            "start": min(by_id[i].start for i in ids) if ids else None,
-            "end": max(by_id[i].end for i in ids) if ids else None,
+            "time_ranges": ranges,
+            "start": ranges[0].start if ranges else None,
+            "end": ranges[-1].end if ranges else None,
         }))
     return analysis.model_copy(update={"stories": stories})
 
@@ -518,7 +532,7 @@ def analyse_transcript(
             model=cfg.model or "",
         )
 
-    key = None
+    key = cfg.api_key.get_secret_value() if cfg.api_key else None  # for redaction
     if llm_provider is None:
         key = resolve_api_key(cfg)
         llm_provider = get_provider(cfg, key)

@@ -118,7 +118,7 @@ def translate_transcript(
         return Translation(source_language=transcript.language, text_en="",
                            provider=cfg.provider, model=cfg.model or "")
 
-    key = None
+    key = cfg.api_key.get_secret_value() if cfg.api_key else None  # for redaction
     if llm_provider is None:
         key = resolve_api_key(cfg)
         llm_provider = get_provider(cfg, key)
