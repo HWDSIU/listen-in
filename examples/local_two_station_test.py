@@ -1,11 +1,11 @@
-"""Record, transcribe and (optionally) summarise one French and one English station.
+"""Record one French and one English station at the same time, then transcribe and analyse them.
 
     python examples/local_two_station_test.py --duration 120 --model small --output-dir ./test-output
 
 The LLM step runs only when both LLM_API_KEY and LLM_MODEL are set (a ./.env file
-in the current directory is read if present). Stations are processed one after the
-other so only one Whisper model is in memory. Exit code is non-zero if capture or
-transcription fails for either station.
+in the current directory is read if present). Both stations are recorded at the
+same time (process_stations); transcription then runs one at a time with a single
+Whisper model. Exit code is non-zero if capture or transcription fails for either station.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from listen_in import ListenInError, process_station, resolve_station
+from listen_in import ListenInError, process_stations, resolve_station
 
 FRENCH_STATION = "https://www.radio-browser.info/history/31074f8a-e6f4-11e9-a96c-52543be04c81"  # France Info
 ENGLISH_STATION = "https://www.radio-browser.info/history/598c4d0e-6b06-43fb-bff4-717c591213a9"  # BBC World Service
@@ -73,18 +73,19 @@ def main() -> int:
         except ListenInError as exc:
             print(f"  {label:8} FAILED to resolve: {exc}")
 
+    print(f"\nRecording {len(STATIONS)} stations at once for {args.duration}s "
+          f"(Whisper '{args.model}') ...")
+    batch = process_stations(
+        [{"station": ref, "language": lang} for _, ref, lang in STATIONS],
+        duration_seconds=args.duration,
+        output_dir=args.output_dir,
+        whisper_model=args.model,
+        llm=llm,
+        device=args.device,
+    )
     exit_code = 0
-    for label, ref, lang in STATIONS:
-        print(f"\n[{label}] recording {args.duration}s, Whisper '{args.model}', language={lang} ...")
-        result = process_station(
-            ref,
-            language=lang,
-            duration_seconds=args.duration,
-            output_dir=args.output_dir,
-            whisper_model=args.model,
-            llm=llm,
-            device=args.device,
-        )
+    for (label, _, lang), result in zip(STATIONS, batch.results, strict=True):
+        print(f"\n[{label}] language={lang}")
         for stage, info in result.stages.items():
             secs = f"{info.seconds:.1f}s" if info.seconds is not None else ""
             err = f"  {info.error}" if info.error else ""

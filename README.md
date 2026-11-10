@@ -27,7 +27,7 @@ print(result.statuses)
 print(result.analysis.analysis.summary_en)
 ```
 
-> **Status:** alpha (0.4.1). The API may change before 1.0.
+> **Status:** alpha (0.5.0). The API may change before 1.0.
 
 [![tests](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml/badge.svg)](https://github.com/HWDSIU/listen-in/actions/workflows/test.yml)
 
@@ -46,6 +46,8 @@ print(result.analysis.analysis.summary_en)
 - **Analyses** each broadcast into stories with topics, the people, organisations and
   places named (with standardised names for matching across stations and languages), key
   claims, uncertainties, and where each story is in the recording (needs an LLM).
+- **Records several stations at once** (up to five), so every station's XX:00 bulletin is
+  caught, then transcribes and analyses each in turn.
 - **Saves** audio, transcripts, analysis and a per-run JSON **manifest** to a local folder
   or any mounted storage path.
 
@@ -76,7 +78,7 @@ Python 3.10 or later. listen-in is **not yet published on PyPI**, so install a t
 release from GitHub:
 
 ```bash
-pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.1"
+pip install "listen-in[whisper,llm-anthropic] @ git+https://github.com/HWDSIU/listen-in.git@v0.5.0"
 ```
 
 Swap `llm-anthropic` for `llm-openai` to use OpenAI or Azure OpenAI / AI Foundry (or
@@ -106,7 +108,7 @@ used, and the error explains how to install them.
 | macOS | `brew install ffmpeg` |
 | Ubuntu / Debian | `sudo apt-get install -y ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `choco install ffmpeg`) |
-| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.4.1` |
+| Anywhere (fallback) | add the `ffmpeg` extra, e.g. `listen-in[whisper,llm-anthropic,ffmpeg] @ git+https://github.com/HWDSIU/listen-in.git@v0.5.0` |
 
 listen-in looks for ffmpeg in this order: `CaptureOptions(ffmpeg_path=...)`, then
 `$LISTEN_IN_FFMPEG`, then `ffmpeg` on `PATH`, then the `imageio-ffmpeg` binary.
@@ -178,11 +180,63 @@ max_tokens"*. The transcript and translation are still saved. Record shorter seg
 or raise the limit if your model allows it, with a longer timeout to match:
 `llm={..., "max_tokens": 32000, "timeout_seconds": 300}`.
 
+### Several stations at once
+
+`process_stations` records up to five stations at the same moment, so a scheduled run
+at XX:00 catches every station's bulletin. Each station can have its own language
+hint, Whisper model, `initial_prompt` and `station_overrides`; everything else is shared.
+
+```python
+from listen_in import process_stations
+
+batch = process_stations(
+    [
+        {"station": "1c3e8be2-5b14-4933-bad3-87cbc227cba4", "language": "de"},   # Deutschlandfunk
+        {"station": "31074f8a-e6f4-11e9-a96c-52543be04c81", "language": "fr"},   # France Info
+        {"station": "<swahili-station-uuid>", "language": "sw", "whisper_model": "turbo"},
+    ],
+    duration_seconds=600,
+    output_dir="./output",
+    whisper_model="small",               # default for stations that don't set their own
+    llm={"provider": "anthropic", "model": "claude-haiku-5-5"},
+)
+print(batch.ok, batch.statuses)
+for result in batch.results:             # one ProcessingResult per station, in the order given
+    print(result.station.name, result.analysis.analysis.summary_en if result.analysis else None)
+```
+
+How it runs:
+
+1. **Checks every station's set-up first** (language, Whisper model, LLM settings).
+   Any mistake raises before anything is recorded.
+2. **Starts all recordings together.** Recording is mostly waiting on the network, so
+   five streams at once is light work.
+3. **Transcribes each recording as soon as it finishes, one at a time.** Running
+   Whisper on several recordings at once would only split the same CPU or GPU and
+   multiply memory. If stations use different models (e.g. `turbo` for Swahili,
+   `small` for the rest), a recording that uses the model already loaded goes first,
+   and a model is released as soon as no remaining station needs it. Normally only one
+   model is in memory; two are held only while a station that needs the first is
+   still recording.
+4. **Translates and analyses** each transcript in the background (up to
+   `max_llm_workers`, default 4, at once) while the next recording is transcribed.
+
+Every station gets its usual files and manifest, all sharing a `batch_id`, and a
+failing station never affects the others. Rough timing for five 10-minute recordings:
+10 minutes of recording, then about 3–4 minutes of transcription each with `small` on
+a laptop CPU (a GPU takes seconds). Allow for this if runs are scheduled every 30
+minutes.
+
+**Catching the start of a bulletin:** internet streams usually run 10–30 seconds behind
+the live broadcast, and bulletins don't always start exactly on the hour. Starting at
+XX:59:30, or recording a minute longer than you need, avoids clipping the first
+headline. Scheduling stays with your job scheduler; listen-in records when it's called.
+
 ### Two-station example
 
 `examples/local_two_station_test.py` records France Info (French) and BBC World Service
-(English), one after the other. The French bulletin is transcribed in French, translated
-and analysed in English:
+(English) at the same time with `process_stations`. The French bulletin is transcribed in
+French, translated and analysed in English:
 
 ```bash
 cp .env.example .env    # add LLM_API_KEY / LLM_MODEL to enable translation and analysis
@@ -336,13 +390,13 @@ described below).
       "headline": "Unions and employers clash over wage rise",
       "summary": "...",
       "topics": ["economy", "labour"],
-      "people": ["Patrick Martin"], "organisations": ["CFDT", "MDF"], "locations": ["France"],
       "entities": [
         {"type": "organisation", "name": "MDF", "canonical_name": "MEDEF", "role": "", "uncertain": true},
         {"type": "person", "name": "Patrick Martin", "canonical_name": "Patrick Martin", "role": "", "uncertain": false}
       ],
       "key_claims": ["..."],
       "uncertainties": ["'MDF' is likely a transcription of MEDEF."],
+      "people": ["Patrick Martin"], "organisations": ["MEDEF"], "locations": [],
       "segment_ids": [3, 4, 5, 41, 42],
       "time_ranges": [{"start": 12.4, "end": 41.0}, {"start": 302.5, "end": 330.1}],
       "start": 12.4, "end": 330.1
@@ -357,8 +411,10 @@ described below).
   corrected or a name spelt in full, so the same entity can be matched across stories,
   stations and languages. The model may use general knowledge only to standardise names,
   never to add facts, and marks guesses with `uncertain: true`. `role` is filled only
-  when the broadcast states it. The broadcasting station itself is never listed. The
-  plain `people` / `organisations` / `locations` lists are kept for simple use.
+  when the broadcast states it. The broadcasting station itself is never listed.
+- **`people`, `organisations`, `locations`**: plain lists of the standard names, for
+  simple use. listen-in fills them from `entities`, so the two always agree; the
+  spellings as heard are in `entities`.
 - **`topics`**: one to three per story, from a fixed list: politics, elections, economy,
   business, labour, conflict, security, crime_justice, health, environment,
   science_technology, education, society, migration, culture, religion, sport, weather,

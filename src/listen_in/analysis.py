@@ -53,8 +53,8 @@ empty stories list, and use summary_en to describe briefly what the segment cont
 - One story per distinct news item. summary_en gives a concise overview of the whole \
 segment.
 - topics: one to three topics per story from the allowed list.
-- entities: list every person, organisation and place from that story's people, \
-organisations and locations, once each. name is the spelling as heard. canonical_name \
+- entities: list every person, organisation and place named in the story, once each. \
+name is the spelling as heard. canonical_name \
 is the standard full form of the same entity (e.g. an acronym spelt out, a misheard \
 spelling corrected); repeat name when unsure, and set uncertain to true when the name \
 may be misheard or the canonical form is a guess. You may use general knowledge only to \
@@ -76,6 +76,26 @@ def build_user_message(transcript: Transcript, station_name: str | None = None) 
     segments = [s for s in transcript.segments if s.text.strip()]
     body = "\n".join(f"[{s.id}] {s.text.strip()}" for s in segments) if segments else transcript.text
     return "\n".join(meta) + f"\n\n<transcript>\n{body}\n</transcript>"
+
+
+def fill_name_lists(analysis: NewsAnalysis) -> NewsAnalysis:
+    """Set each story's people/organisations/locations from its entities' standard names.
+
+    The model writes names once, in ``entities``; the plain lists are derived here so the
+    two always agree. Duplicates (ignoring case) are dropped, keeping first-seen order.
+    """
+    keys = {"person": "people", "organisation": "organisations", "location": "locations"}
+    stories = []
+    for story in analysis.stories:
+        lists: dict[str, list[str]] = {key: [] for key in keys.values()}
+        seen: set[tuple[str, str]] = set()
+        for entity in story.entities:
+            name = (entity.canonical_name or entity.name).strip()
+            if name and (entity.type, name.casefold()) not in seen:
+                seen.add((entity.type, name.casefold()))
+                lists[keys[entity.type]].append(name)
+        stories.append(story.model_copy(update=lists))
+    return analysis.model_copy(update={"stories": stories})
 
 
 def add_story_times(analysis: NewsAnalysis, transcript: Transcript) -> NewsAnalysis:
@@ -548,7 +568,7 @@ def analyse_transcript(
         task="analyse this transcript",
     )
     return AnalysisResult(
-        analysis=add_story_times(call.parsed, transcript),
+        analysis=add_story_times(fill_name_lists(call.parsed), transcript),
         provider=cfg.provider,
         model=cfg.model or "",
         input_tokens=call.input_tokens,

@@ -306,3 +306,38 @@ def test_story_time_ranges_split_where_segments_are_not_consecutive():
     assert [(t.start, t.end) for t in a.time_ranges] == [(0.0, 3.5), (8.0, 11.5)]
     assert (a.start, a.end) == (0.0, 11.5)
     assert [(t.start, t.end) for t in b.time_ranges] == [(4.0, 11.5)]
+
+
+# ------------------------------------------- plain name lists come from entities
+def test_plain_lists_are_filled_from_entities_with_standard_names():
+    story = {
+        **VALID["stories"][0],
+        # What a model might write in the plain lists is ignored...
+        "people": ["somebody else"], "organisations": [], "locations": ["Russia", "Australia"],
+        # ...because the lists are built from entities.
+        "entities": [
+            {"type": "location", "name": "Russie", "canonical_name": "Russia", "role": "", "uncertain": False},
+            {"type": "location", "name": "États-Unis", "canonical_name": "United States",
+             "role": "", "uncertain": False},
+            {"type": "organisation", "name": "MDF", "canonical_name": "MEDEF", "role": "", "uncertain": True},
+            {"type": "person", "name": "Patrick Martin", "canonical_name": "Patrick Martin",
+             "role": "president of MEDEF", "uncertain": False},
+            {"type": "location", "name": "russie", "canonical_name": "russia", "role": "", "uncertain": False},
+            {"type": "organisation", "name": "CFDT", "canonical_name": "", "role": "", "uncertain": False},
+        ],
+    }
+    r = analyse_transcript(transcript(), llm_provider=FakeProvider(ok({**VALID, "stories": [story]})))
+    s = r.analysis.stories[0]
+    assert s.people == ["Patrick Martin"]
+    assert s.organisations == ["MEDEF", "CFDT"]          # empty canonical_name falls back to name
+    assert s.locations == ["Russia", "United States"]    # duplicate (any case) dropped
+    assert [e.name for e in s.entities][:2] == ["Russie", "États-Unis"]  # as heard, kept in entities
+
+
+def test_model_is_not_asked_for_the_plain_lists():
+    from listen_in.models import NewsAnalysis
+
+    props = NewsAnalysis.model_json_schema()["$defs"]["NewsStory"]["properties"]
+    assert not {"people", "organisations", "locations"} & set(props)
+    assert "entities" in props
+    assert "named in the story, once each" in SYSTEM_PROMPT

@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-10
+
+### Added
+- `process_stations()`: record up to five stations at the same moment (e.g. every
+  station's XX:00 bulletin), then transcribe and analyse each. Recordings run in
+  background threads; each is transcribed as soon as it finishes, one at a time;
+  translation and analysis run in a pool (`max_llm_workers`, default 4) alongside.
+  Every station's set-up is checked before anything is recorded, and a failing
+  station never affects the others.
+- Per-station settings through `StationRequest` (or dicts): `language`,
+  `whisper_model`, `initial_prompt`, `station_overrides`. Stations can use different
+  Whisper models (e.g. `turbo` for Swahili, `small` for the rest): the queue
+  transcribes recordings that use the loaded model first and releases a model as
+  soon as no remaining station needs it, so normally only one model is in memory.
+- `BatchResult` (results in input order, `ok`, `statuses`) and a shared `batch_id` on
+  each run's result, manifest and analysis `run` block.
+- `listen_in.transcription.release_whisper_model()`.
+
+### Changed
+- The pipeline is organised as reusable per-station stages; `process_station`
+  behaves exactly as before.
+- The two-station example records both stations at once.
+
+### Fixed
+- The plain `people` / `organisations` / `locations` lists and `entities` could
+  disagree (about 1 story in 8), e.g. "Russia" in one and "Russie" in the other,
+  because the model wrote every name twice. The model now writes names once, in
+  `entities`, and listen-in fills the plain lists from the entities' standard names
+  (duplicates dropped). The output shape is unchanged; analysis responses are a little
+  shorter.
+
 ## [0.4.1] - 2026-11-10
 
 ### Fixed

@@ -205,12 +205,9 @@ class NewsStory(BaseModel):
     headline: str = Field(description="Short English headline.")
     summary: str = Field(description="Factual English summary based only on the transcript.")
     topics: list[Topic] = Field(description="One to three topics from the fixed list.")
-    people: list[str] = Field(description="People named, spelt as heard.")
-    organisations: list[str] = Field(description="Organisations named.")
-    locations: list[str] = Field(description="Places named.")
     entities: list[Entity] = Field(
-        description="Every person, organisation and place in people/organisations/locations, "
-        "with its type, standard name and stated role. Exclude the broadcasting station itself."
+        description="Every person, organisation and place named in the story, once each, with its "
+        "type, standard name and stated role. Exclude the broadcasting station itself."
     )
     key_claims: list[str] = Field(description="Specific factual claims made in the broadcast.")
     uncertainties: list[str] = Field(
@@ -219,7 +216,17 @@ class NewsStory(BaseModel):
     segment_ids: list[int] = Field(
         description="Ids of the transcript segments ([n] markers) this story comes from."
     )
-    # Filled in by listen-in from segment_ids (not requested from the model).
+    # Filled in by listen-in, not requested from the model: the plain name lists come from
+    # entities (standard names), so the two can never disagree; times come from segment_ids.
+    people: SkipJsonSchema[list[str]] = Field(
+        default_factory=list, description="Standard names of the people in entities."
+    )
+    organisations: SkipJsonSchema[list[str]] = Field(
+        default_factory=list, description="Standard names of the organisations in entities."
+    )
+    locations: SkipJsonSchema[list[str]] = Field(
+        default_factory=list, description="Standard names of the places in entities."
+    )
     time_ranges: SkipJsonSchema[list[TimeRange]] = Field(
         default_factory=list,
         description="Where the story is in the recording: one range per run of consecutive segments. "
@@ -380,6 +387,7 @@ class RunContext(_Model):
     """Where and when a run happened, so an analysis file stands on its own."""
 
     run_id: str
+    batch_id: str | None = Field(default=None, description="Shared by runs recorded together.")
     recorded_at: datetime | None = Field(default=None, description="When recording started (UTC).")
     duration_seconds: float | None = None
     language: str | None = Field(default=None, description="Language the transcript is in.")
@@ -420,6 +428,9 @@ class ProcessingResult(_Model):
     """Everything produced by :func:`listen_in.process_station` for one run."""
 
     run_id: str
+    batch_id: str | None = Field(
+        default=None, description="Set when the run was part of process_stations; shared by the batch."
+    )
     package_version: str
     started_at: datetime
     finished_at: datetime | None = None
@@ -457,3 +468,34 @@ class ProcessingResult(_Model):
     @property
     def statuses(self) -> dict[str, StageStatus]:
         return {k: v.status for k, v in self.stages.items()}
+
+
+# ----------------------------------------------------------------- several stations
+class StationRequest(_Model):
+    """One station in :func:`listen_in.process_stations`, with its own settings."""
+
+    station: str | Station = Field(description="Stream URL, Radio Browser UUID or history URL, or a Station.")
+    language: str | None = Field(default=None, description="ISO 639-1 hint for this station (None = detect).")
+    whisper_model: str | None = Field(
+        default=None, description="Override the batch's Whisper model, e.g. 'turbo' for Swahili."
+    )
+    initial_prompt: str | None = None
+    station_overrides: dict[str, Any] | None = None
+
+
+class BatchResult(_Model):
+    """Results of :func:`listen_in.process_stations`, one per station, in the order given."""
+
+    batch_id: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    results: list[ProcessingResult] = Field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """True when every station's run succeeded (skipped stages are fine)."""
+        return all(r.ok for r in self.results)
+
+    @property
+    def statuses(self) -> dict[str, dict[str, StageStatus]]:
+        return {r.run_id: r.statuses for r in self.results}

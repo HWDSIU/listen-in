@@ -158,6 +158,24 @@ def clear_model_cache() -> None:
         _MODELS.clear()
 
 
+def release_whisper_model(model: str) -> bool:
+    """Drop a cached Whisper model (any device) to free memory. Returns True if one was cached."""
+    with _MODELS_LOCK:
+        keys = [k for k in _MODELS if k[0] == model]
+        for k in keys:
+            del _MODELS[k]
+    if keys:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:  # pragma: no cover - torch comes with whisper
+            pass
+        log.info("Released Whisper model %r", model)
+    return bool(keys)
+
+
 def _load_audio(path: Path, whisper: Any, np: Any) -> tuple[Any, float | None]:
     """Read 16 kHz mono PCM WAV directly (no ffmpeg needed); else defer to Whisper."""
     try:

@@ -272,3 +272,13 @@ def test_deleted_recording_cannot_be_transcribed(fake_whisper, tmp_path):
                         sample_rate=16_000, channels=1, size_bytes=0, ffmpeg_path="ffmpeg")
     with pytest.raises(InvalidInputError, match="deleted"):
         transcribe_audio(gone, language="fr")
+
+
+def test_release_whisper_model_frees_only_that_model(fake_whisper, tmp_path):
+    from listen_in.transcription import _MODELS, load_whisper_model, release_whisper_model
+
+    load_whisper_model("small")
+    load_whisper_model("turbo")
+    assert release_whisper_model("small") is True
+    assert {k[0] for k in _MODELS} == {"turbo"}
+    assert release_whisper_model("small") is False
